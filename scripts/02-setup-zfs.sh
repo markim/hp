@@ -156,13 +156,19 @@ create_zfs_pool() {
         warning "Pool '$pool_name' already exists"
         if [[ "${FORCE_INSTALL:-no}" == "yes" ]] || [[ "$WIPE_DRIVES" == "yes" ]]; then
             info "Destroying existing pool '$pool_name'..."
-            zpool destroy "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+            if ! force_unmount_and_export_pool "$pool_name"; then
+                # If export failed, try force destroy
+                zpool destroy -f "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+            fi
             success "Existing pool '$pool_name' destroyed"
         else
             read -p "Pool '$pool_name' exists. Destroy it? (type 'yes' to confirm): " confirm
             if [[ "$confirm" == "yes" ]]; then
                 info "Destroying existing pool '$pool_name'..."
-                zpool destroy "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+                if ! force_unmount_and_export_pool "$pool_name"; then
+                    # If export failed, try force destroy
+                    zpool destroy -f "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+                fi
                 success "Existing pool '$pool_name' destroyed"
             else
                 error_exit "Cannot proceed with existing pool '$pool_name'. Installation cancelled."
@@ -257,6 +263,51 @@ check_existing_pools() {
         fi
     else
         info "No existing ZFS pools found"
+    fi
+}
+
+# Force unmount all datasets and export pool
+force_unmount_and_export_pool() {
+    local pool_name="$1"
+    
+    info "Force unmounting all datasets for pool '$pool_name'..."
+    
+    # Get all mounted datasets for this pool
+    local datasets
+    datasets=$(zfs list -H -o name,mountpoint | grep "^$pool_name" | awk '{print $1}' || true)
+    
+    if [[ -n "$datasets" ]]; then
+        # Unmount all datasets in reverse order (children first)
+        echo "$datasets" | tac | while read -r dataset; do
+            if [[ -n "$dataset" ]]; then
+                info "Unmounting dataset: $dataset"
+                zfs unmount -f "$dataset" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # Force unmount any remaining mountpoints
+    local mountpoints
+    mountpoints=$(mount | grep " on .* type zfs " | grep "$pool_name" | awk '{print $3}' || true)
+    
+    if [[ -n "$mountpoints" ]]; then
+        echo "$mountpoints" | while read -r mountpoint; do
+            if [[ -n "$mountpoint" ]]; then
+                info "Force unmounting: $mountpoint"
+                umount -f "$mountpoint" 2>/dev/null || true
+                umount -l "$mountpoint" 2>/dev/null || true  # lazy unmount as last resort
+            fi
+        done
+    fi
+    
+    # Try to export the pool first (cleaner than destroy)
+    info "Attempting to export pool '$pool_name'..."
+    if zpool export "$pool_name" 2>/dev/null; then
+        success "Pool '$pool_name' exported successfully"
+        return 0
+    else
+        warning "Could not export pool '$pool_name', will attempt force destroy"
+        return 1
     fi
 }
 
