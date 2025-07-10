@@ -374,6 +374,10 @@ setup_zfs_pools() {
                 create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
                 rpool_created=true
             else
+                # Wipe drive before adding to existing rpool
+                if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                    wipe_drive "${drives[0]}"
+                fi
                 # Add single drive to existing rpool
                 add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
             fi
@@ -386,6 +390,12 @@ setup_zfs_pools() {
                 create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
                 rpool_created=true
             else
+                # Wipe drives before adding to existing rpool
+                if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                    for drive in "${drives[@]}"; do
+                        wipe_drive "$drive"
+                    done
+                fi
                 # Add mirror vdev to existing rpool
                 add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
             fi
@@ -402,6 +412,11 @@ setup_zfs_pools() {
                         create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
                         rpool_created=true
                     else
+                        # Wipe drives before adding to existing rpool
+                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                            wipe_drive "${drives[$i]}"
+                            wipe_drive "${drives[$((i + 1))]}"
+                        fi
                         # Add mirror vdev to existing rpool
                         add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
                     fi
@@ -414,6 +429,10 @@ setup_zfs_pools() {
                         create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
                         rpool_created=true
                     else
+                        # Wipe drive before adding to existing rpool
+                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                            wipe_drive "${drives[$i]}"
+                        fi
                         # Add single drive to existing rpool
                         add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
                     fi
@@ -430,6 +449,10 @@ setup_zfs_pools() {
                     create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
                     rpool_created=true
                 else
+                    # Wipe drive before adding to existing rpool
+                    if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                        wipe_drive "$drive"
+                    fi
                     # Add single drive to existing rpool
                     add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
                 fi
