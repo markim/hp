@@ -91,6 +91,12 @@ mount_proxmox_iso() {
     
     info "Mounting Proxmox ISO..."
     
+    # Check if already mounted and unmount if necessary
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        warning "ISO already mounted at $mount_point, unmounting first..."
+        umount "$mount_point" || warning "Failed to unmount existing mount"
+    fi
+    
     mkdir -p "$mount_point"
     mount -o loop "$iso_path" "$mount_point" || error_exit "Failed to mount Proxmox ISO"
     
