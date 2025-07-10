@@ -7,15 +7,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/server-config.conf
-source "${SCRIPT_DIR}/config/server-config.conf"h
-
-# Post-Installation Configuration Script for Proxmox
-# This script performs final configuration and cleanup
-
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../config/server-config.conf
 source "${SCRIPT_DIR}/config/server-config.conf"
 
 # Colors for output

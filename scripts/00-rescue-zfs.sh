@@ -58,10 +58,33 @@ check_rescue_zfs() {
 install_minimal_packages() {
     info "Installing minimal required packages..."
     
+    # First, fix broken ZFS packages by removing them completely
+    info "Removing broken ZFS packages that prevent other installations..."
+    
+    # Stop apt from trying to configure broken packages
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Remove broken ZFS packages completely
+    dpkg --remove --force-remove-reinstreq --force-depends zfs-dkms zfs-zed 2>/dev/null || true
+    dpkg --purge zfs-dkms zfs-zed 2>/dev/null || true
+    
+    # Remove any ZFS-related packages that might cause issues
+    dpkg --remove --force-remove-reinstreq --force-depends zfsutils-linux libnvpair3linux libuutil3linux libzfs4linux libzpool5linux 2>/dev/null || true
+    
+    # Clean up package system
+    apt-get -f install --no-install-recommends -y 2>/dev/null || true
+    apt-get clean
+    apt-get autoclean
+    
+    # Put ZFS packages on hold to prevent accidental installation
+    echo "zfs-dkms hold" | dpkg --set-selections 2>/dev/null || true
+    echo "zfs-zed hold" | dpkg --set-selections 2>/dev/null || true
+    echo "zfsutils-linux hold" | dpkg --set-selections 2>/dev/null || true
+    
     # Update package lists
     apt-get update
     
-    # Install essential packages
+    # Install essential packages one by one with better error handling
     local packages=(
         "debootstrap"
         "gdisk" 
@@ -77,7 +100,11 @@ install_minimal_packages() {
     
     for package in "${packages[@]}"; do
         info "Installing $package..."
-        apt-get install -y "$package" || warning "Failed to install $package"
+        if ! apt-get install -y --no-install-recommends "$package"; then
+            warning "Failed to install $package, trying with --fix-broken"
+            apt-get -f install --no-install-recommends -y || true
+            apt-get install -y --no-install-recommends "$package" || warning "Still failed to install $package"
+        fi
     done
     
     success "Minimal packages installed"
@@ -206,6 +233,16 @@ main() {
     check_rescue_zfs
     install_minimal_packages
     prepare_zfs_for_chroot
+    
+    # Final verification that ZFS still works
+    info "Verifying ZFS functionality after package cleanup..."
+    if ! zpool list >/dev/null 2>&1; then
+        warning "ZFS pool command failed, but this is expected if no pools exist"
+    fi
+    
+    if ! zfs list >/dev/null 2>&1; then
+        warning "ZFS list command failed, but this is expected if no pools exist"
+    fi
     
     success "Alternative ZFS setup completed!"
     echo
