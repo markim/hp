@@ -9,10 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/server-config.conf
 source "${SCRIPT_DIR}/config/server-config.conf"
 
-# Source ZFS helper functions
-# shellcheck source=./zfs-helpers.sh
-source "${SCRIPT_DIR}/scripts/zfs-helpers.sh"
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -105,14 +101,36 @@ mount_proxmox_iso() {
 install_base_system() {
     info "Installing base Debian system..."
     
-    # Test and fix ZFS functionality if needed
-    test_and_fix_zfs || error_exit "ZFS functionality test failed"
+    # Ensure ZFS is functional before proceeding
+    if ! zpool list >/dev/null 2>&1; then
+        error_exit "ZFS is not functional. Please check ZFS installation."
+    fi
     
-    # Mount ZFS filesystem using helper function
+    # Mount ZFS filesystem
     local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
     local mount_point="/mnt/proxmox"
     
-    safe_zfs_mount "$root_fs" "$mount_point" "yes" || error_exit "Failed to mount root filesystem"
+    mkdir -p "$mount_point"
+    
+    # Set the mountpoint property first
+    zfs set mountpoint="$mount_point" "$root_fs" || error_exit "Failed to set ZFS mountpoint"
+    
+    # Try different mounting approaches
+    if zfs mount "$root_fs" 2>/dev/null; then
+        success "ZFS mounted using zfs mount command"
+    elif mount -t zfs "$root_fs" "$mount_point" 2>/dev/null; then
+        success "ZFS mounted using mount command"
+    else
+        # Last resort: try to mount with legacy mountpoint
+        zfs set mountpoint=legacy "$root_fs"
+        mount -t zfs "$root_fs" "$mount_point" || error_exit "Failed to mount root filesystem"
+        success "ZFS mounted in legacy mode"
+    fi
+    
+    # Verify mount was successful
+    if ! mountpoint -q "$mount_point"; then
+        error_exit "Mount verification failed - $mount_point is not mounted"
+    fi
     
     success "Root filesystem mounted at $mount_point"
     
