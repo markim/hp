@@ -156,7 +156,7 @@ install_base_system() {
     
     # Install essential packages
     chroot "$mount_point" apt-get update
-    chroot "$mount_point" apt-get install -y wget curl gnupg2 ca-certificates
+    chroot "$mount_point" apt-get install -y wget curl gnupg2 ca-certificates locales
     
     # Unmount filesystems (will be remounted later in setup_chroot)
     umount "$mount_point/sys" || true
@@ -283,7 +283,11 @@ EOF
     
     # Configure locale
     echo "$LOCALE UTF-8" > "$mount_point/etc/locale.gen"
-    chroot "$mount_point" locale-gen
+    if chroot "$mount_point" locale-gen; then
+        success "Locale generated successfully"
+    else
+        warning "Failed to generate locale, continuing anyway"
+    fi
     echo "LANG=$LOCALE" > "$mount_point/etc/default/locale"
     
     success "System settings configured"
