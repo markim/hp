@@ -155,8 +155,8 @@ install_base_system() {
     cp /etc/resolv.conf "$mount_point/etc/resolv.conf"
     
     # Install essential packages
-    chroot "$mount_point" apt-get update
-    chroot "$mount_point" apt-get install -y wget curl gnupg2 ca-certificates locales
+    LANG=C LC_ALL=C chroot "$mount_point" apt-get update
+    LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive chroot "$mount_point" apt-get install -y wget curl gnupg2 ca-certificates locales
     
     # Unmount filesystems (will be remounted later in setup_chroot)
     umount "$mount_point/sys" || true
@@ -202,6 +202,11 @@ install_proxmox_packages() {
 #!/bin/bash
 set -euo pipefail
 
+# Set locale to avoid perl warnings during package installation
+export LANG=C
+export LC_ALL=C
+export DEBIAN_FRONTEND=noninteractive
+
 # Add Proxmox repository
 echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
 
@@ -212,7 +217,7 @@ wget https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -O /etc/
 apt-get update
 
 # Install Proxmox kernel and packages
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
+apt-get install -y \
     proxmox-ve \
     postfix \
     open-iscsi \
@@ -281,14 +286,21 @@ EOF
     # Configure timezone
     chroot "$mount_point" ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
     
-    # Configure locale
+    # Configure locale - Set C locale first to avoid perl warnings
+    echo "LANG=C" > "$mount_point/etc/default/locale"
+    echo "LC_ALL=C" >> "$mount_point/etc/default/locale"
+    
+    # Generate the desired locale
     echo "$LOCALE UTF-8" > "$mount_point/etc/locale.gen"
     if chroot "$mount_point" locale-gen; then
         success "Locale generated successfully"
+        # Now set the proper locale after generation
+        echo "LANG=$LOCALE" > "$mount_point/etc/default/locale"
+        echo "LC_ALL=" >> "$mount_point/etc/default/locale"
     else
-        warning "Failed to generate locale, continuing anyway"
+        warning "Failed to generate locale, keeping C locale"
+        echo "LANG=C" > "$mount_point/etc/default/locale"
     fi
-    echo "LANG=$LOCALE" > "$mount_point/etc/default/locale"
     
     success "System settings configured"
 }
@@ -375,17 +387,48 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet"
 GRUB_CMDLINE_LINUX="root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
 EOF
     
-    # Update GRUB configuration
-    chroot "$mount_point" update-grub
+    # Create a script to configure GRUB with proper ZFS setup
+    cat > "$mount_point/tmp/configure-grub.sh" << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+# Set environment variables for ZFS
+export ZPOOL_VDEV_NAME_PATH=1
+
+# Make sure ZFS modules are loaded
+modprobe zfs || true
+
+# Import the pool if not already imported
+zpool import -f "$1" || true
+
+# Update initramfs to include ZFS
+update-initramfs -u -k all
+
+# Update GRUB configuration
+update-grub
+
+# Install GRUB to boot devices
+for drive in $2; do
+    echo "Installing GRUB to $drive"
+    grub-install --target=i386-pc "$drive" || echo "Warning: Failed to install GRUB to $drive"
+done
+EOF
     
-    # Install GRUB to all drives in root pool
+    chmod +x "$mount_point/tmp/configure-grub.sh"
+    
+    # Get the list of drives in the root pool
     local root_drives
-    root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+sd|^\s+nvme' | awk '{print "/dev/" $1}')
+    root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
     
-    for drive in $root_drives; do
-        info "Installing GRUB to $drive"
-        chroot "$mount_point" grub-install "$drive" || warning "Failed to install GRUB to $drive"
-    done
+    if [[ -z "$root_drives" ]]; then
+        # Try alternative method to get drives
+        root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
+    fi
+    
+    info "Root pool drives: $root_drives"
+    
+    # Run GRUB configuration in chroot
+    chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives" || warning "GRUB configuration had issues but continuing"
     
     success "Bootloader configured"
 }
