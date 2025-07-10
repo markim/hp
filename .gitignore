@@ -1,0 +1,44 @@
+# Temporary files
+*.tmp
+*.log
+/tmp/*
+
+# Backup files
+*.bak
+*.backup
+backups/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local configuration overrides
+config/local-*
+config/*.local
+
+# Installation artifacts
+proxmox-ve.iso
+installation-summary.txt
+network-backup/
+installation-backup/
+
+# ZFS cache files
+zpool.cache
+
+# SSH keys
+*.key
+*.pub
+id_rsa*
+id_ed25519*

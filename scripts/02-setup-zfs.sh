@@ -1,0 +1,340 @@
+#!/bin/bash
+
+# ZFS Setup Script for Hetzner Proxmox Installation
+# This script configures ZFS pools with automatic mirroring
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/server-config.conf
+source "${SCRIPT_DIR}/config/server-config.conf"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a /tmp/proxmox-install.log
+}
+
+error_exit() {
+    echo -e "${RED}ERROR: $1${NC}" >&2
+    log "ERROR: $1"
+    exit 1
+}
+
+success() {
+    echo -e "${GREEN}✓ $1${NC}"
+    log "SUCCESS: $1"
+}
+
+info() {
+    echo -e "${BLUE}ℹ $1${NC}"
+    log "INFO: $1"
+}
+
+warning() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+    log "WARNING: $1"
+}
+
+# Get drive size in bytes
+get_drive_size() {
+    local drive="$1"
+    lsblk -bnd -o SIZE "$drive" | tr -d ' '
+}
+
+# Get drive size in GB for display
+get_drive_size_gb() {
+    local drive="$1"
+    local size_bytes
+    size_bytes=$(get_drive_size "$drive")
+    echo $((size_bytes / 1024 / 1024 / 1024))
+}
+
+# Analyze drives and group by size
+analyze_drives() {
+    info "Analyzing drives for ZFS configuration..."
+    
+    declare -A drive_groups
+    local drives=()
+    
+    # Get all available drives
+    while IFS= read -r drive; do
+        if [[ " ${EXCLUDE_DRIVES[*]} " =~ ${drive} ]]; then
+            continue
+        fi
+        drives+=("$drive")
+    done < <(lsblk -nd -o NAME | grep -E '^(sd|nvme|vd)' | sed 's/^/\/dev\//')
+    
+    if [[ ${#drives[@]} -eq 0 ]]; then
+        error_exit "No suitable drives found for ZFS setup"
+    fi
+    
+    # Group drives by size
+    for drive in "${drives[@]}"; do
+        local size_gb
+        size_gb=$(get_drive_size_gb "$drive")
+        
+        if [[ -z "${drive_groups[$size_gb]:-}" ]]; then
+            drive_groups[$size_gb]="$drive"
+        else
+            drive_groups[$size_gb]="${drive_groups[$size_gb]} $drive"
+        fi
+    done
+    
+    # Display drive groups
+    echo "=== Drive Groups by Size ==="
+    for size in "${!drive_groups[@]}"; do
+        local group_drives=(${drive_groups[$size]})
+        echo "Size: ${size}GB - Drives: ${group_drives[*]} (${#group_drives[@]} drives)"
+        
+        if [[ ${#group_drives[@]} -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+            echo "  → Will create ZFS mirror"
+        elif [[ ${#group_drives[@]} -gt 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+            echo "  → Will create multiple ZFS mirrors (pairs)"
+        else
+            echo "  → Will create individual ZFS pools"
+        fi
+    done
+    echo
+    
+    # Store for later use
+    printf '%s\n' "${!drive_groups[@]}" > /tmp/drive_sizes.txt
+    for size in "${!drive_groups[@]}"; do
+        echo "${drive_groups[$size]}" > "/tmp/drives_${size}gb.txt"
+    done
+    
+    success "Drive analysis completed"
+}
+
+# Wipe a drive completely
+wipe_drive() {
+    local drive="$1"
+    info "Wiping drive $drive..."
+    
+    # Unmount any mounted filesystems
+    umount "${drive}"* 2>/dev/null || true
+    
+    # Stop any LVM/mdadm
+    vgchange -an 2>/dev/null || true
+    mdadm --stop --scan 2>/dev/null || true
+    
+    # Wipe filesystem signatures
+    wipefs -a "$drive" 2>/dev/null || true
+    
+    # Zero out the beginning and end of the drive
+    dd if=/dev/zero of="$drive" bs=1M count=100 2>/dev/null || true
+    dd if=/dev/zero of="$drive" bs=1M seek=$(($(get_drive_size "$drive") / 1024 / 1024 - 100)) count=100 2>/dev/null || true
+    
+    # Clear partition table
+    sgdisk --zap-all "$drive" 2>/dev/null || true
+    
+    success "Drive $drive wiped"
+}
+
+# Create ZFS pool
+create_zfs_pool() {
+    local pool_name="$1"
+    local pool_type="$2"
+    shift 2
+    local drives=("$@")
+    
+    info "Creating ZFS pool '$pool_name' with type '$pool_type'..."
+    
+    # Build zpool create command
+    local cmd="zpool create"
+    
+    # Add pool options
+    for option in "${ZFS_POOL_OPTIONS[@]}"; do
+        cmd="$cmd -o $option"
+    done
+    
+    # Add pool name
+    cmd="$cmd $pool_name"
+    
+    # Add vdev configuration
+    if [[ "$pool_type" == "mirror" ]]; then
+        cmd="$cmd mirror"
+    fi
+    
+    # Add drives
+    for drive in "${drives[@]}"; do
+        cmd="$cmd $drive"
+    done
+    
+    info "Executing: $cmd"
+    eval "$cmd" || error_exit "Failed to create ZFS pool $pool_name"
+    
+    success "ZFS pool '$pool_name' created successfully"
+}
+
+# Configure ZFS datasets
+create_zfs_datasets() {
+    local pool_name="$1"
+    
+    info "Creating ZFS datasets for pool '$pool_name'..."
+    
+    # Create root dataset
+    zfs create -o "${ZFS_ROOT_OPTIONS[@]}" "$pool_name/ROOT" || error_exit "Failed to create ROOT dataset"
+    
+    # Create system datasets
+    zfs create -o canmount=noauto -o mountpoint=/ "$pool_name/ROOT/pve-1" || error_exit "Failed to create pve-1 dataset"
+    zfs create "$pool_name/data" || error_exit "Failed to create data dataset"
+    zfs create "$pool_name/data/subvol-100-disk-0" || error_exit "Failed to create subvol dataset"
+    
+    success "ZFS datasets created for pool '$pool_name'"
+}
+
+# Setup ZFS pools based on drive analysis
+setup_zfs_pools() {
+    info "Setting up ZFS pools..."
+    
+    local pool_counter=1
+    
+    while IFS= read -r size; do
+        local drives
+        read -ra drives < "/tmp/drives_${size}gb.txt"
+        local num_drives=${#drives[@]}
+        
+        info "Processing ${num_drives} drive(s) of size ${size}GB: ${drives[*]}"
+        
+        # Wipe drives first
+        for drive in "${drives[@]}"; do
+            if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                wipe_drive "$drive"
+            fi
+        done
+        
+        # Create pools based on number of drives and configuration
+        if [[ $num_drives -eq 1 ]]; then
+            # Single drive - create single pool
+            local pool_name
+            if [[ $pool_counter -eq 1 ]]; then
+                pool_name="$ZFS_ROOT_POOL_NAME"
+            else
+                pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+            fi
+            
+            create_zfs_pool "$pool_name" "single" "${drives[0]}"
+            
+            if [[ $pool_counter -eq 1 ]]; then
+                create_zfs_datasets "$pool_name"
+            fi
+            
+        elif [[ $num_drives -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+            # Two drives - create mirror
+            local pool_name
+            if [[ $pool_counter -eq 1 ]]; then
+                pool_name="$ZFS_ROOT_POOL_NAME"
+            else
+                pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+            fi
+            
+            create_zfs_pool "$pool_name" "mirror" "${drives[@]}"
+            
+            if [[ $pool_counter -eq 1 ]]; then
+                create_zfs_datasets "$pool_name"
+            fi
+            
+        elif [[ $num_drives -gt 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+            # Multiple drives - create mirrors in pairs
+            local i=0
+            while [[ $i -lt $num_drives ]]; do
+                if [[ $((i + 1)) -lt $num_drives ]]; then
+                    # Create mirror with pair
+                    local pool_name
+                    if [[ $pool_counter -eq 1 ]]; then
+                        pool_name="$ZFS_ROOT_POOL_NAME"
+                    else
+                        pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+                    fi
+                    
+                    create_zfs_pool "$pool_name" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
+                    
+                    if [[ $pool_counter -eq 1 ]]; then
+                        create_zfs_datasets "$pool_name"
+                    fi
+                    
+                    pool_counter=$((pool_counter + 1))
+                    i=$((i + 2))
+                else
+                    # Odd drive - create single pool
+                    local pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+                    create_zfs_pool "$pool_name" "single" "${drives[$i]}"
+                    pool_counter=$((pool_counter + 1))
+                    i=$((i + 1))
+                fi
+            done
+            continue  # Skip the pool_counter increment at the end
+            
+        else
+            # Create individual pools for each drive
+            for drive in "${drives[@]}"; do
+                local pool_name
+                if [[ $pool_counter -eq 1 ]]; then
+                    pool_name="$ZFS_ROOT_POOL_NAME"
+                else
+                    pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+                fi
+                
+                create_zfs_pool "$pool_name" "single" "$drive"
+                
+                if [[ $pool_counter -eq 1 ]]; then
+                    create_zfs_datasets "$pool_name"
+                fi
+                
+                pool_counter=$((pool_counter + 1))
+            done
+            continue  # Skip the pool_counter increment at the end
+        fi
+        
+        pool_counter=$((pool_counter + 1))
+        
+    done < /tmp/drive_sizes.txt
+    
+    success "All ZFS pools configured"
+}
+
+# Display ZFS configuration
+display_zfs_status() {
+    info "Final ZFS configuration:"
+    echo
+    echo "=== ZFS Pools ==="
+    zpool list
+    echo
+    echo "=== ZFS Pool Status ==="
+    zpool status
+    echo
+    echo "=== ZFS Datasets ==="
+    zfs list
+    echo
+}
+
+# Main function
+main() {
+    info "Starting ZFS setup..."
+    
+    analyze_drives
+    
+    # Confirmation prompt
+    echo -e "${YELLOW}WARNING: This will destroy all data on the selected drives!${NC}"
+    read -p "Continue with ZFS setup? (type 'yes' to confirm): " confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        info "ZFS setup cancelled by user"
+        exit 0
+    fi
+    
+    setup_zfs_pools
+    display_zfs_status
+    
+    success "ZFS setup completed successfully!"
+    echo
+    echo "Next step: Run ./scripts/03-install-proxmox.sh"
+}
+
+main "$@"

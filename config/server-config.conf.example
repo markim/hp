@@ -1,0 +1,160 @@
+# Example Configuration Scenarios
+# Copy this file to server-config.conf and modify as needed
+
+# ===========================================
+# SCENARIO 1: Basic Setup (Most Common)
+# ===========================================
+# Use this for most installations where you want:
+# - Automatic drive detection and mirroring
+# - Default ZFS settings optimized for Proxmox
+# - Current network configuration preserved
+
+# Network Configuration (leave empty to auto-detect)
+NETWORK_INTERFACE=""
+NETWORK_IP=""
+NETWORK_NETMASK=""
+NETWORK_GATEWAY=""
+NETWORK_DNS1="8.8.8.8"
+NETWORK_DNS2="8.8.4.4"
+
+# ZFS Configuration
+ZFS_ROOT_POOL_NAME="rpool"
+ZFS_DATA_POOL_NAME="data"
+ZFS_COMPRESSION="lz4"
+ZFS_ATIME="off"
+ZFS_RELATIME="on"
+
+# Enable automatic mirroring for drives >= 100GB
+AUTO_MIRROR="yes"
+MIN_MIRROR_SIZE="100"
+
+# Proxmox Settings
+PROXMOX_ISO_URL="https://hetzner:download@download.hetzner.com/bootimages/iso/proxmox-ve_8.3-1.iso"
+PROXMOX_HOSTNAME=""  # Leave empty to use current hostname
+
+# Installation Options
+WIPE_DRIVES="yes"
+BACKUP_EXISTING_CONFIG="yes"
+ENABLE_SSH="yes"
+DISABLE_ENTERPRISE_REPO="yes"
+
+# ===========================================
+# SCENARIO 2: High Performance Setup
+# ===========================================
+# Uncomment and modify these settings for high-performance workloads:
+
+# ZFS_COMPRESSION="zstd"        # Better compression but more CPU
+# ZFS_ATIME="off"              # Disable access time for performance
+# ZFS_RELATIME="off"           # Disable relative time updates
+
+# Additional ZFS optimizations
+# ZFS_POOL_OPTIONS=(
+#     "ashift=12"
+#     "compression=${ZFS_COMPRESSION}"
+#     "atime=${ZFS_ATIME}"
+#     "relatime=${ZFS_RELATIME}"
+#     "recordsize=64K"           # Larger record size for VMs
+#     "logbias=throughput"       # Optimize for throughput
+# )
+
+# ===========================================
+# SCENARIO 3: Mixed Drive Sizes
+# ===========================================
+# For servers with different drive sizes:
+
+# Only mirror drives larger than 500GB
+# MIN_MIRROR_SIZE="500"
+
+# Exclude specific drives (e.g., system drives)
+# EXCLUDE_DRIVES=("/dev/sda" "/dev/nvme0n1")
+
+# ===========================================
+# SCENARIO 4: Custom Network Configuration
+# ===========================================
+# Use specific network settings instead of auto-detection:
+
+# NETWORK_INTERFACE="eth0"
+# NETWORK_IP="192.168.1.100"
+# NETWORK_NETMASK="255.255.255.0"
+# NETWORK_GATEWAY="192.168.1.1"
+# NETWORK_DNS1="192.168.1.1"
+# NETWORK_DNS2="8.8.8.8"
+
+# ===========================================
+# SCENARIO 5: Development/Testing Setup
+# ===========================================
+# For testing or development environments:
+
+# DEBUG="yes"                  # Enable verbose logging
+# DRY_RUN="yes"               # Show what would be done without executing
+# FORCE_INSTALL="no"          # Require confirmations
+# MIN_MIRROR_SIZE="10"        # Allow small drives for testing
+
+# ===========================================
+# SCENARIO 6: Enterprise Setup
+# ===========================================
+# For production enterprise environments:
+
+# DISABLE_ENTERPRISE_REPO="no"  # Keep enterprise repo enabled
+# ZFS_COMPRESSION="gzip"        # Maximum compression
+# BACKUP_EXISTING_CONFIG="yes"  # Always backup configs
+# 
+# # Use multiple DNS servers for redundancy
+# NETWORK_DNS1="1.1.1.1"
+# NETWORK_DNS2="8.8.8.8"
+
+# ===========================================
+# Advanced ZFS Options
+# ===========================================
+
+# System Configuration
+TIMEZONE="UTC"
+LOCALE="en_US.UTF-8"
+KEYBOARD_LAYOUT="us"
+
+# ZFS Pool Options (applied to all pools)
+ZFS_POOL_OPTIONS=(
+    "ashift=12"                    # 4K sectors (optimal for modern drives)
+    "compression=${ZFS_COMPRESSION}"
+    "atime=${ZFS_ATIME}"
+    "relatime=${ZFS_RELATIME}"
+)
+
+# ZFS Root Dataset Options
+ZFS_ROOT_OPTIONS=(
+    "compression=${ZFS_COMPRESSION}"
+    "atime=${ZFS_ATIME}"
+    "relatime=${ZFS_RELATIME}"
+    "canmount=off"
+    "mountpoint=none"
+)
+
+# Drives to exclude from ZFS setup (examples)
+# EXCLUDE_DRIVES=()              # No exclusions (default)
+# EXCLUDE_DRIVES=("/dev/sda")    # Exclude single drive
+# EXCLUDE_DRIVES=("/dev/sda" "/dev/sdb")  # Exclude multiple drives
+
+# Debug and Testing Options
+DEBUG="no"                       # Enable debug output
+DRY_RUN="no"                    # Perform actual operations
+FORCE_INSTALL="no"              # Require user confirmations
+
+# ===========================================
+# Validation Notes
+# ===========================================
+# 
+# Before running the installation:
+# 1. Verify PROXMOX_ISO_URL is accessible
+# 2. Check that excluded drives are correct
+# 3. Ensure network settings match your environment
+# 4. Backup any important data
+# 5. Test with DRY_RUN="yes" first
+#
+# Common Proxmox ISO URLs:
+# - Hetzner mirror: https://hetzner:download@download.hetzner.com/bootimages/iso/proxmox-ve_8.3-1.iso
+# - Official: https://download.proxmox.com/iso/proxmox-ve_8.3-1.iso
+# 
+# Drive naming conventions:
+# - SATA/SAS drives: /dev/sda, /dev/sdb, etc.
+# - NVMe drives: /dev/nvme0n1, /dev/nvme1n1, etc.
+# - Virtual drives: /dev/vda, /dev/vdb, etc.
