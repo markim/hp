@@ -134,10 +134,42 @@ set_root_password() {
     passwd root
 }
 
-# Generate SSH keys
-generate_ssh_keys() {
-    info "Generating SSH host keys..."
+# Copy SSH keys from rescue environment
+copy_rescue_ssh_keys() {
+    info "Copying SSH keys from rescue environment..."
     
+    # Copy existing SSH host keys if they exist
+    if [[ -d /etc/ssh ]]; then
+        # Backup any existing keys in the new environment
+        if [[ -d /etc/ssh ]]; then
+            mkdir -p /etc/ssh/backup
+            cp /etc/ssh/ssh_host_* /etc/ssh/backup/ 2>/dev/null || true
+        fi
+        
+        # Copy rescue environment SSH keys
+        cp /etc/ssh/ssh_host_* /etc/ssh/ 2>/dev/null || true
+        
+        # Copy authorized_keys if they exist
+        if [[ -f /root/.ssh/authorized_keys ]]; then
+            mkdir -p /root/.ssh
+            cp /root/.ssh/authorized_keys /root/.ssh/
+            chmod 600 /root/.ssh/authorized_keys
+            chmod 700 /root/.ssh
+        fi
+        
+        # Ensure proper permissions
+        chmod 600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
+        chmod 644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+    fi
+    
+    success "SSH keys copied from rescue environment"
+}
+
+# Generate SSH keys (fallback if rescue keys don't exist)
+generate_ssh_keys() {
+    info "Generating missing SSH host keys..."
+    
+    # Only generate keys that don't already exist
     ssh-keygen -A
     
     success "SSH keys generated"
@@ -168,6 +200,7 @@ main() {
     configure_repositories
     update_system
     configure_storage
+    copy_rescue_ssh_keys
     generate_ssh_keys
     configure_firewall
     set_root_password
@@ -178,12 +211,15 @@ main() {
     success "Proxmox first boot configuration completed!"
     
     echo
-    echo "=== Installation Summary ==="
-    echo "Proxmox VE has been successfully installed with ZFS storage."
-    echo "Web interface will be available at: https://$(hostname -I | awk '{print $1}'):8006"
+    echo "=== REBOOT REQUIRED ==="
+    echo "The Proxmox installation is complete and requires a reboot to finish."
+    echo "After reboot, access the web interface at: https://$(hostname -I | awk '{print $1}'):8006"
     echo "Default login: root"
     echo
-    echo "Please reboot the system to complete the installation."
+    echo "IMPORTANT: Remove the rescue system from boot order in Hetzner Robot"
+    echo "           before rebooting to ensure the new installation boots correctly."
+    echo
+    echo "To reboot now, run: reboot"
 }
 
 main "$@"
@@ -240,12 +276,20 @@ Interface: $(ip route | grep default | awk '{print $5}' | head -1)
 Gateway: $(ip route | grep default | awk '{print $3}' | head -1)
 
 === Next Steps ===
-1. Reboot the system: reboot
-2. Remove rescue system from boot order in Hetzner Robot
+1. **REBOOT REQUIRED**: Run 'reboot' to complete the installation
+2. **IMPORTANT**: Remove rescue system from boot order in Hetzner Robot BEFORE rebooting
 3. Access Proxmox web interface at: https://$(ip route get 1.1.1.1 | grep src | awk '{print $7}'):8006
 4. Login with root and the password you set during installation
 
+=== CRITICAL: Reboot Instructions ===
+- The installation is NOT complete until you reboot
+- SSH keys from rescue environment have been preserved
+- Remove rescue system from Hetzner Robot boot order first
+- Then run: reboot
+
 === Important Notes ===
+- **REBOOT IS REQUIRED** to complete the installation
+- SSH keys from rescue environment have been preserved
 - The system will complete configuration on first boot
 - SSH is enabled for remote access
 - ZFS pools are configured with compression and optimal settings
@@ -347,6 +391,7 @@ main() {
         fi
     fi
     
+    copy_rescue_ssh_keys_to_install
     create_firstboot_script
     verify_installation
     backup_installation_info
@@ -355,16 +400,22 @@ main() {
     
     success "Post-installation configuration completed!"
     echo
+    echo -e "${RED}=== REBOOT REQUIRED ===${NC}"
+    echo -e "${YELLOW}⚠ The installation is NOT complete until you reboot!${NC}"
+    echo
     echo -e "${GREEN}=== Installation Complete! ===${NC}"
     echo "Your Proxmox VE server is ready for reboot."
     echo
-    echo "To complete the installation:"
-    echo "1. Run: reboot"
-    echo "2. Remove rescue system from Hetzner Robot"
+    echo -e "${BLUE}To complete the installation:${NC}"
+    echo "1. ${RED}FIRST:${NC} Remove rescue system from Hetzner Robot boot order"
+    echo "2. ${GREEN}THEN:${NC} Run: reboot"
     echo "3. Access Proxmox at: https://$(ip route get 1.1.1.1 | grep src | awk '{print $7}'):8006"
     echo
-    echo "Installation log: /tmp/proxmox-install.log"
-    echo "Installation summary: /tmp/installation-summary.txt"
+    echo -e "${BLUE}SSH Keys:${NC} Rescue environment SSH keys have been preserved"
+    echo -e "${BLUE}Logs:${NC} Installation log: /tmp/proxmox-install.log"
+    echo -e "${BLUE}Summary:${NC} Installation summary: /tmp/installation-summary.txt"
+    echo
+    echo -e "${RED}Remember: Reboot is required to complete the installation!${NC}"
 }
 
 main "$@"

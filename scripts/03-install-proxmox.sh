@@ -392,26 +392,71 @@ EOF
 #!/bin/bash
 set -euo pipefail
 
+echo "Starting GRUB configuration..."
+
 # Set environment variables for ZFS
 export ZPOOL_VDEV_NAME_PATH=1
 
 # Make sure ZFS modules are loaded
-modprobe zfs || true
+if ! modprobe zfs 2>/dev/null; then
+    echo "Warning: Could not load ZFS module"
+fi
 
 # Import the pool if not already imported
-zpool import -f "$1" || true
+if ! zpool list "$1" >/dev/null 2>&1; then
+    echo "Importing ZFS pool $1..."
+    if ! zpool import -f "$1" 2>/dev/null; then
+        echo "Warning: Pool import failed or already imported"
+    fi
+fi
 
 # Update initramfs to include ZFS
-update-initramfs -u -k all
+echo "Updating initramfs..."
+if update-initramfs -u -k all; then
+    echo "✓ Initramfs updated successfully"
+else
+    echo "⚠ Warning: Initramfs update failed"
+    # Continue anyway as this might still work
+fi
 
 # Update GRUB configuration
-update-grub
+echo "Updating GRUB configuration..."
+if update-grub; then
+    echo "✓ GRUB configuration updated"
+else
+    echo "⚠ Warning: GRUB configuration update failed"
+    # Try to continue with installation anyway
+fi
 
 # Install GRUB to boot devices
+echo "Installing GRUB to drives: $2"
+failed_drives=0
+installed_drives=0
+
 for drive in $2; do
-    echo "Installing GRUB to $drive"
-    grub-install --target=i386-pc "$drive" || echo "Warning: Failed to install GRUB to $drive"
+    # Clean up drive path
+    drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
+    if [[ -n "$drive" && -b "$drive" ]]; then
+        echo "Installing GRUB to $drive"
+        if grub-install --target=i386-pc "$drive" 2>/dev/null; then
+            echo "✓ GRUB installed successfully to $drive"
+            ((installed_drives++))
+        else
+            echo "⚠ Warning: Failed to install GRUB to $drive"
+            ((failed_drives++))
+        fi
+    else
+        echo "⚠ Skipping invalid drive: '$drive'"
+    fi
 done
+
+if [[ $installed_drives -gt 0 ]]; then
+    echo "✓ GRUB configuration completed! Successfully installed to $installed_drives drive(s)"
+    exit 0
+else
+    echo "⚠ Error: GRUB installation failed on all drives"
+    exit 1
+fi
 EOF
     
     chmod +x "$mount_point/tmp/configure-grub.sh"
@@ -425,10 +470,55 @@ EOF
         root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
     fi
     
+    if [[ -z "$root_drives" ]]; then
+        # Final fallback - try to get drives from zpool status with different pattern
+        root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+sd|^\s+nvme' | awk '{print "/dev/" $1}' | tr '\n' ' ')
+    fi
+    
     info "Root pool drives: $root_drives"
     
-    # Run GRUB configuration in chroot
-    chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives" || warning "GRUB configuration had issues but continuing"
+    # Run GRUB configuration in chroot with better error handling
+    if [[ -n "$root_drives" ]]; then
+        info "Running GRUB configuration script..."
+        if chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives"; then
+            success "GRUB configuration completed successfully"
+        else
+            warning "GRUB configuration script failed, attempting manual recovery..."
+            
+            # Ensure chroot environment is still set up
+            mount --bind /dev "$mount_point/dev" 2>/dev/null || true
+            mount --bind /proc "$mount_point/proc" 2>/dev/null || true
+            mount --bind /sys "$mount_point/sys" 2>/dev/null || true
+            
+            # Manual GRUB installation as fallback
+            info "Performing manual GRUB configuration..."
+            chroot "$mount_point" bash -c "modprobe zfs || true"
+            chroot "$mount_point" bash -c "zpool import -f '$ZFS_ROOT_POOL_NAME' || true"
+            
+            info "Updating initramfs manually..."
+            chroot "$mount_point" bash -c "update-initramfs -u -k all || echo 'Initramfs update failed'"
+            
+            info "Updating GRUB configuration manually..."
+            chroot "$mount_point" bash -c "update-grub || echo 'GRUB update failed'"
+            
+            # Install GRUB to each drive individually
+            for drive in $root_drives; do
+                drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
+                if [[ -n "$drive" && -b "$drive" ]]; then
+                    info "Installing GRUB to $drive manually..."
+                    if chroot "$mount_point" grub-install --target=i386-pc "$drive"; then
+                        success "GRUB installed to $drive"
+                    else
+                        warning "Failed to install GRUB to $drive - system may not boot from this drive"
+                    fi
+                fi
+            done
+            
+            warning "Manual GRUB configuration completed with potential issues"
+        fi
+    else
+        warning "No drives found for GRUB installation - this may cause boot issues"
+    fi
     
     success "Bootloader configured"
 }
@@ -472,6 +562,44 @@ cleanup_chroot() {
     umount /mnt/proxmox-iso || true
     
     success "Cleanup completed"
+}
+
+# Resume installation from bootloader configuration
+resume_from_bootloader() {
+    info "Resuming installation from bootloader configuration..."
+    
+    # Check if root pool exists
+    if ! zpool list "$ZFS_ROOT_POOL_NAME" >/dev/null 2>&1; then
+        error_exit "Root ZFS pool '$ZFS_ROOT_POOL_NAME' not found. Cannot resume installation."
+    fi
+    
+    # Check if Proxmox is already installed
+    local mount_point="/mnt/proxmox"
+    local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+    
+    # Mount the filesystem if not already mounted
+    if ! mountpoint -q "$mount_point"; then
+        mkdir -p "$mount_point"
+        zfs set mountpoint="$mount_point" "$root_fs" 2>/dev/null || true
+        
+        if ! zfs mount "$root_fs" 2>/dev/null; then
+            mount -t zfs "$root_fs" "$mount_point" || error_exit "Failed to mount root filesystem for resume"
+        fi
+    fi
+    
+    # Check if this is a valid Proxmox installation
+    if [[ ! -f "$mount_point/usr/bin/pvesh" ]]; then
+        error_exit "Proxmox installation not found in mounted filesystem. Cannot resume."
+    fi
+    
+    setup_chroot
+    configure_bootloader
+    configure_ssh
+    cleanup_chroot
+    
+    success "Installation resumed and completed!"
+    echo
+    echo "Next step: Run ./scripts/04-post-install.sh"
 }
 
 # Main function

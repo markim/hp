@@ -30,7 +30,7 @@ MIN_MIRROR_SIZE="100"
 
 # Proxmox Settings
 PROXMOX_ISO_URL="https://hetzner:download@download.hetzner.com/bootimages/iso/proxmox-ve_8.3-1.iso"
-PROXMOX_HOSTNAME=""  # Leave empty to use current hostname
+PROXMOX_HOSTNAME="proxmox"  # Leave empty to use current hostname
 
 # Installation Options
 WIPE_DRIVES="yes"
