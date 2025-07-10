@@ -41,12 +41,56 @@ warning() {
     log "WARNING: $1"
 }
 
+# Debug function to help troubleshoot issues
+debug_system_state() {
+    echo -e "${BLUE}=== SYSTEM DEBUG INFORMATION ===${NC}"
+    
+    echo -e "\n${YELLOW}ZFS Module Status:${NC}"
+    lsmod | grep zfs || echo "ZFS module not loaded"
+    
+    echo -e "\n${YELLOW}ZFS Pools:${NC}"
+    timeout 10 zpool list 2>&1 || echo "zpool list failed or timed out"
+    
+    echo -e "\n${YELLOW}ZFS Pool Status for $ZFS_ROOT_POOL_NAME:${NC}"
+    timeout 30 zpool status "$ZFS_ROOT_POOL_NAME" 2>&1 || echo "zpool status failed or timed out"
+    
+    echo -e "\n${YELLOW}Available Drives:${NC}"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL
+    
+    echo -e "\n${YELLOW}Drive Details:${NC}"
+    for drive in /dev/sd* /dev/nvme*n*; do
+        if [[ -b "$drive" ]]; then
+            echo "$drive: $(lsblk -nd -o SIZE,MODEL "$drive" 2>/dev/null || echo 'unknown')"
+        fi
+    done
+    
+    echo -e "\n${YELLOW}Current Mounts:${NC}"
+    mount | grep -E "(zfs|/mnt)"
+    
+    echo -e "\n${YELLOW}Process List (ZFS related):${NC}"
+    ps aux | grep -E "(zfs|zpool)" | grep -v grep || echo "No ZFS processes found"
+    
+    echo -e "\n${BLUE}=== END DEBUG INFORMATION ===${NC}"
+}
+
 # Check if root pool exists
 check_root_pool() {
     if ! zpool list "$ZFS_ROOT_POOL_NAME" >/dev/null 2>&1; then
         error_exit "Root ZFS pool '$ZFS_ROOT_POOL_NAME' not found. Please run 02-setup-zfs.sh first."
     fi
     success "Root ZFS pool '$ZFS_ROOT_POOL_NAME' found"
+    
+    # Additional debugging info
+    info "ZFS pool status check..."
+    if timeout 30 zpool status "$ZFS_ROOT_POOL_NAME" >/tmp/current_pool_status.log 2>&1; then
+        info "Pool status retrieved successfully"
+        # Show basic pool info
+        local pool_health
+        pool_health=$(grep "state:" /tmp/current_pool_status.log | awk '{print $2}' || echo "unknown")
+        info "Pool health: $pool_health"
+    else
+        warning "Could not retrieve pool status within 30 seconds"
+    fi
 }
 
 # Download Proxmox ISO
@@ -521,32 +565,89 @@ EOF
     info "Detecting drives in root pool..."
     local root_drives
     
-    # Method 1: Look for drives with /dev/ prefix
-    root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
+    # Function to run ZFS commands with timeout
+    run_zfs_command() {
+        local cmd="$1"
+        local timeout_duration=30
+        info "Running: $cmd (timeout: ${timeout_duration}s)"
+        
+        if timeout "$timeout_duration" bash -c "$cmd" 2>/dev/null; then
+            return 0
+        else
+            warning "Command timed out after ${timeout_duration}s: $cmd"
+            return 1
+        fi
+    }
+    
+    # Verify ZFS is functional before attempting drive detection
+    info "Verifying ZFS functionality..."
+    if ! timeout 10 zpool list >/dev/null 2>&1; then
+        warning "ZFS commands are not responding, trying to load modules..."
+        modprobe zfs || warning "Could not load ZFS module"
+        
+        if ! timeout 10 zpool list >/dev/null 2>&1; then
+            error_exit "ZFS is not functional. Cannot detect drives for GRUB installation."
+        fi
+    fi
+    success "ZFS is functional"
+    
+    # Method 1: Look for drives with /dev/ prefix using zpool status
+    info "Trying zpool status method..."
+    if run_zfs_command "zpool status '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_status.tmp 2>&1"; then
+        root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_status.tmp | awk '{print $1}' | tr '\n' ' ')
+        info "Found drives with /dev/ prefix: $root_drives"
+    else
+        warning "zpool status command failed or timed out"
+    fi
     
     if [[ -z "$root_drives" ]]; then
         info "No /dev/ prefixed drives found, trying alternative methods..."
         # Method 2: Look for nvme/sd drives without /dev/ prefix and add it
-        root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' | awk '{print "/dev/" $1}' | tr '\n' ' ')
+        if [[ -f /tmp/zpool_status.tmp ]]; then
+            root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_status.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
+            info "Found drives without /dev/ prefix: $root_drives"
+        fi
     fi
     
     if [[ -z "$root_drives" ]]; then
         info "Trying zpool list method..."
         # Method 3: Try zpool list -v
-        root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
+        if run_zfs_command "zpool list -v '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_list.tmp 2>&1"; then
+            root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_list.tmp | awk '{print $1}' | tr '\n' ' ')
+            info "Found drives using zpool list: $root_drives"
+        fi
     fi
     
     if [[ -z "$root_drives" ]]; then
         info "Trying zpool list with device name detection..."
         # Method 4: Try zpool list -v with device name detection
-        root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' | awk '{print "/dev/" $1}' | tr '\n' ' ')
+        if [[ -f /tmp/zpool_list.tmp ]]; then
+            root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_list.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
+            info "Found drives using zpool list without /dev/: $root_drives"
+        fi
     fi
     
     if [[ -z "$root_drives" ]]; then
-        warning "Could not detect drives in root pool, attempting manual detection..."
-        # Last resort: try to find the drives manually
-        root_drives=$(lsblk -nd -o NAME,TYPE | grep disk | awk '{print "/dev/" $1}' | head -2 | tr '\n' ' ')
+        warning "Could not detect drives from ZFS commands, attempting manual detection..."
+        # Method 5: Try to get drives from zpool cache
+        if [[ -f /etc/zfs/zpool.cache ]]; then
+            info "Checking zpool cache..."
+            if run_zfs_command "zdb -C '$ZFS_ROOT_POOL_NAME' >/tmp/zdb_output.tmp 2>&1"; then
+                root_drives=$(grep -oE '"/dev/[^"]+' /tmp/zdb_output.tmp | sed 's/"//g' | tr '\n' ' ')
+                info "Found drives from zpool cache: $root_drives"
+            fi
+        fi
     fi
+    
+    if [[ -z "$root_drives" ]]; then
+        # Last resort: try to find the drives manually
+        warning "All ZFS detection methods failed, using system drive detection..."
+        root_drives=$(lsblk -nd -o NAME,TYPE | grep disk | awk '{print "/dev/" $1}' | head -2 | tr '\n' ' ')
+        info "Using system drives: $root_drives"
+    fi
+    
+    # Clean up temporary files
+    rm -f /tmp/zpool_status.tmp /tmp/zpool_list.tmp /tmp/zdb_output.tmp
     
     info "Root pool drives detected: $root_drives"
     
@@ -647,6 +748,12 @@ cleanup_chroot() {
 
 # Main function
 main() {
+    # Check for debug flag
+    if [[ "${1:-}" == "--debug" ]]; then
+        debug_system_state
+        exit 0
+    fi
+    
     info "Starting Proxmox installation..."
     
     check_root_pool
