@@ -358,17 +358,14 @@ setup_zfs_pools() {
         
         info "Processing ${num_drives} drive(s) of size ${size}GB: ${drives[*]}"
         
-        # Wipe drives first
-        for drive in "${drives[@]}"; do
-            if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                wipe_drive "$drive"
-            fi
-        done
-        
         # Create pools based on number of drives and configuration
         if [[ $num_drives -eq 1 ]]; then
             # Single drive
             if [[ "$rpool_created" == "false" ]]; then
+                # Wipe drive before creating initial rpool
+                if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                    wipe_drive "${drives[0]}"
+                fi
                 # Create initial rpool
                 create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
                 create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
@@ -385,6 +382,12 @@ setup_zfs_pools() {
         elif [[ $num_drives -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
             # Two drives - create/add mirror
             if [[ "$rpool_created" == "false" ]]; then
+                # Wipe drives before creating initial rpool
+                if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                    for drive in "${drives[@]}"; do
+                        wipe_drive "$drive"
+                    done
+                fi
                 # Create initial rpool as mirror
                 create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
                 create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
@@ -407,6 +410,11 @@ setup_zfs_pools() {
                 if [[ $((i + 1)) -lt $num_drives ]]; then
                     # Create/add mirror with pair
                     if [[ "$rpool_created" == "false" ]]; then
+                        # Wipe drives before creating initial rpool
+                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                            wipe_drive "${drives[$i]}"
+                            wipe_drive "${drives[$((i + 1))]}"
+                        fi
                         # Create initial rpool as mirror
                         create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
                         create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
@@ -424,6 +432,10 @@ setup_zfs_pools() {
                 else
                     # Odd drive - add as single vdev
                     if [[ "$rpool_created" == "false" ]]; then
+                        # Wipe drive before creating initial rpool
+                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                            wipe_drive "${drives[$i]}"
+                        fi
                         # Create initial rpool
                         create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
                         create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
@@ -444,6 +456,10 @@ setup_zfs_pools() {
             # Create individual vdevs for each drive
             for drive in "${drives[@]}"; do
                 if [[ "$rpool_created" == "false" ]]; then
+                    # Wipe drive before creating initial rpool
+                    if [[ "$WIPE_DRIVES" == "yes" ]]; then
+                        wipe_drive "$drive"
+                    fi
                     # Create initial rpool
                     create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
                     create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
