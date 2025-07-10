@@ -112,9 +112,13 @@ TIMEZONE="UTC"
 LOCALE="en_US.UTF-8"
 KEYBOARD_LAYOUT="us"
 
-# ZFS Pool Options (applied to all pools)
+# ZFS Pool Options (applied to all pools - only valid pool properties)
 ZFS_POOL_OPTIONS=(
     "ashift=12"                    # 4K sectors (optimal for modern drives)
+)
+
+# ZFS Dataset Options (applied to datasets after pool creation)
+ZFS_DATASET_OPTIONS=(
     "compression=${ZFS_COMPRESSION}"
     "atime=${ZFS_ATIME}"
     "relatime=${ZFS_RELATIME}"

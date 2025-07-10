@@ -145,13 +145,11 @@ create_zfs_pool() {
     
     info "Creating ZFS pool '$pool_name' with type '$pool_type'..."
     
-    # Build zpool create command
+    # Build zpool create command with only valid pool properties
     local cmd="zpool create"
     
-    # Add pool options
-    for option in "${ZFS_POOL_OPTIONS[@]}"; do
-        cmd="$cmd -o $option"
-    done
+    # Add only valid pool options (not dataset options)
+    cmd="$cmd -o ashift=12"
     
     # Add pool name
     cmd="$cmd $pool_name"
@@ -169,6 +167,12 @@ create_zfs_pool() {
     info "Executing: $cmd"
     eval "$cmd" || error_exit "Failed to create ZFS pool $pool_name"
     
+    # Set dataset properties after pool creation
+    info "Setting dataset properties on pool '$pool_name'..."
+    zfs set compression="$ZFS_COMPRESSION" "$pool_name" || warning "Failed to set compression on $pool_name"
+    zfs set atime="$ZFS_ATIME" "$pool_name" || warning "Failed to set atime on $pool_name"
+    zfs set relatime="$ZFS_RELATIME" "$pool_name" || warning "Failed to set relatime on $pool_name"
+    
     success "ZFS pool '$pool_name' created successfully"
 }
 
@@ -178,13 +182,26 @@ create_zfs_datasets() {
     
     info "Creating ZFS datasets for pool '$pool_name'..."
     
-    # Create root dataset
-    zfs create -o "${ZFS_ROOT_OPTIONS[@]}" "$pool_name/ROOT" || error_exit "Failed to create ROOT dataset"
+    # Create root dataset with proper options
+    local root_opts=""
+    for option in "${ZFS_ROOT_OPTIONS[@]}"; do
+        root_opts="$root_opts -o $option"
+    done
+    
+    info "Creating ROOT dataset..."
+    eval "zfs create $root_opts $pool_name/ROOT" || error_exit "Failed to create ROOT dataset"
     
     # Create system datasets
+    info "Creating system datasets..."
     zfs create -o canmount=noauto -o mountpoint=/ "$pool_name/ROOT/pve-1" || error_exit "Failed to create pve-1 dataset"
     zfs create "$pool_name/data" || error_exit "Failed to create data dataset"
     zfs create "$pool_name/data/subvol-100-disk-0" || error_exit "Failed to create subvol dataset"
+    
+    # Apply dataset options to data datasets
+    info "Applying dataset properties..."
+    zfs set compression="$ZFS_COMPRESSION" "$pool_name/data" || warning "Failed to set compression on data"
+    zfs set atime="$ZFS_ATIME" "$pool_name/data" || warning "Failed to set atime on data"
+    zfs set relatime="$ZFS_RELATIME" "$pool_name/data" || warning "Failed to set relatime on data"
     
     success "ZFS datasets created for pool '$pool_name'"
 }
