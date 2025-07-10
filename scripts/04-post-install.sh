@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# Post-Installation Configuration Script for Proxmox on ZFS
+# This script performs final configuration and cleanup after Proxmox installation
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config/server-config.conf
+source "${SCRIPT_DIR}/config/server-config.conf"
+
+# Source ZFS helper functions
+# shellcheck source=./zfs-helpers.sh
+source "${SCRIPT_DIR}/scripts/zfs-helpers.sh"h
+
 # Post-Installation Configuration Script for Proxmox
 # This script performs final configuration and cleanup
 
@@ -331,8 +344,14 @@ final_cleanup() {
 main() {
     info "Starting post-installation configuration..."
     
-    # Mount root filesystem for configuration
-    mount -t zfs "$ZFS_ROOT_POOL_NAME/ROOT/pve-1" /mnt/proxmox
+    # Test and fix ZFS functionality if needed
+    test_and_fix_zfs || error_exit "ZFS functionality test failed"
+    
+    # Mount root filesystem for configuration using helper function
+    local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+    local mount_point="/mnt/proxmox"
+    
+    safe_zfs_mount "$root_fs" "$mount_point" "yes" || error_exit "Failed to mount root filesystem for post-install"
     
     create_firstboot_script
     verify_installation

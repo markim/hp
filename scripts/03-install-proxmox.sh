@@ -9,6 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/server-config.conf
 source "${SCRIPT_DIR}/config/server-config.conf"
 
+# Source ZFS helper functions
+# shellcheck source=./zfs-helpers.sh
+source "${SCRIPT_DIR}/scripts/zfs-helpers.sh"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -101,12 +105,16 @@ mount_proxmox_iso() {
 install_base_system() {
     info "Installing base Debian system..."
     
-    # Mount ZFS filesystem
-    local root_fs="/$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+    # Test and fix ZFS functionality if needed
+    test_and_fix_zfs || error_exit "ZFS functionality test failed"
+    
+    # Mount ZFS filesystem using helper function
+    local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
     local mount_point="/mnt/proxmox"
     
-    mkdir -p "$mount_point"
-    mount -t zfs "$root_fs" "$mount_point" || error_exit "Failed to mount root filesystem"
+    safe_zfs_mount "$root_fs" "$mount_point" "yes" || error_exit "Failed to mount root filesystem"
+    
+    success "Root filesystem mounted at $mount_point"
     
     # Install base system
     debootstrap --arch=amd64 bookworm "$mount_point" http://deb.debian.org/debian || error_exit "Failed to install base system"
@@ -138,6 +146,13 @@ install_proxmox_packages() {
     
     info "Installing Proxmox packages..."
     
+    # Copy rescue ZFS installation script if available
+    if [[ -f /tmp/zfs-rescue/install-rescue-zfs.sh ]]; then
+        cp /tmp/zfs-rescue/install-rescue-zfs.sh "$mount_point/tmp/"
+        # Also copy the ZFS binaries directory
+        cp -r /tmp/zfs-rescue "$mount_point/tmp/"
+    fi
+    
     # Create script to run in chroot
     cat > "$mount_point/tmp/install-proxmox.sh" << 'EOF'
 #!/bin/bash
@@ -159,17 +174,29 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     open-iscsi \
     chrony
 
-# Install ZFS utilities
-apt-get install -y zfsutils-linux || {
-    echo "Warning: Could not install zfsutils-linux package, will copy from rescue system"
-    # Copy ZFS binaries from rescue system if package installation fails
-    if [[ -d /tmp/zfs-rescue ]]; then
-        cp /tmp/zfs-rescue/zfs /usr/sbin/ 2>/dev/null || true
-        cp /tmp/zfs-rescue/zpool /usr/sbin/ 2>/dev/null || true
-        cp -r /tmp/zfs-rescue/lib/* /usr/lib/ 2>/dev/null || true
-        chmod +x /usr/sbin/zfs /usr/sbin/zpool
+# Try to install ZFS utilities from packages first
+if ! apt-get install -y zfsutils-linux 2>/dev/null; then
+    echo "Warning: Could not install zfsutils-linux package"
+    
+    # Use rescue system ZFS if package installation fails
+    if [[ -f /tmp/install-rescue-zfs.sh ]]; then
+        echo "Installing ZFS from rescue system..."
+        /tmp/install-rescue-zfs.sh
+    else
+        echo "Error: No ZFS installation method available"
+        exit 1
     fi
-}
+else
+    echo "ZFS utilities installed from packages"
+    
+    # Check for symbol compatibility issues
+    if ! /sbin/mount.zfs --help >/dev/null 2>&1; then
+        echo "Warning: Package ZFS has compatibility issues, using rescue system ZFS"
+        if [[ -f /tmp/install-rescue-zfs.sh ]]; then
+            /tmp/install-rescue-zfs.sh
+        fi
+    fi
+fi
 
 # Configure ZFS to import pools on boot
 systemctl enable zfs-import-cache
