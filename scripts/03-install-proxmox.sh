@@ -41,6 +41,38 @@ warning() {
     log "WARNING: $1"
 }
 
+# Debug ZFS state for troubleshooting
+debug_zfs_state() {
+    echo -e "${BLUE}=== ZFS DEBUG INFORMATION ===${NC}"
+    
+    echo -e "\n${YELLOW}ZFS Module Status:${NC}"
+    lsmod | grep zfs || echo "ZFS module not loaded"
+    
+    echo -e "\n${YELLOW}ZFS Process Status:${NC}"
+    ps aux | grep -E "(zfs|zpool|zdb)" | grep -v grep || echo "No ZFS processes found"
+    
+    echo -e "\n${YELLOW}ZFS Lock Status:${NC}"
+    if [[ -d /var/lock/zfs ]]; then
+        ls -la /var/lock/zfs/ || echo "No ZFS locks directory or no locks"
+    else
+        echo "No ZFS locks directory"
+    fi
+    
+    echo -e "\n${YELLOW}ZFS Cache Files:${NC}"
+    if [[ -f /etc/zfs/zpool.cache ]]; then
+        echo "Cache file exists: $(ls -la /etc/zfs/zpool.cache)"
+        echo "Cache content preview:"
+        strings /etc/zfs/zpool.cache 2>/dev/null | grep -E "^/dev/" | head -5 || echo "No device paths in cache"
+    else
+        echo "No zpool.cache file found"
+    fi
+    
+    echo -e "\n${YELLOW}Quick ZFS Test:${NC}"
+    timeout 5 zpool list 2>&1 | head -3 || echo "ZFS commands hanging or failing"
+    
+    echo -e "\n${BLUE}=== END ZFS DEBUG ===${NC}"
+}
+
 # Debug function to help troubleshoot issues
 debug_system_state() {
     echo -e "${BLUE}=== SYSTEM DEBUG INFORMATION ===${NC}"
@@ -71,6 +103,46 @@ debug_system_state() {
     ps aux | grep -E "(zfs|zpool)" | grep -v grep || echo "No ZFS processes found"
     
     echo -e "\n${BLUE}=== END DEBUG INFORMATION ===${NC}"
+}
+
+# Clean up any hung ZFS processes and clear locks
+cleanup_zfs_processes() {
+    info "Cleaning up ZFS processes and locks..."
+    
+    # Kill any hung zpool or zfs processes
+    for proc in zpool zfs zdb; do
+        if pgrep -x "$proc" >/dev/null 2>&1; then
+            warning "Found hung $proc processes, terminating..."
+            pkill -9 "$proc" 2>/dev/null || true
+            sleep 1
+        fi
+    done
+    
+    # Clear any ZFS locks that might be hanging
+    if [[ -d /var/lock/zfs ]]; then
+        warning "Clearing ZFS locks..."
+        rm -f /var/lock/zfs/* 2>/dev/null || true
+    fi
+    
+    # Force reload ZFS module if processes were killed
+    local killed_processes=false
+    if ! pgrep -x "zpool|zfs|zdb" >/dev/null 2>&1; then
+        if lsmod | grep -q zfs; then
+            info "Reloading ZFS module after cleanup..."
+            modprobe -r zfs 2>/dev/null || true
+            sleep 2
+            modprobe zfs 2>/dev/null || warning "Could not reload ZFS module"
+            killed_processes=true
+        fi
+    fi
+    
+    # Give the system a moment to stabilize after cleanup
+    if [[ "$killed_processes" == "true" ]]; then
+        info "Waiting for ZFS subsystem to stabilize..."
+        sleep 3
+    fi
+    
+    success "ZFS cleanup completed"
 }
 
 # Check if root pool exists
@@ -565,44 +637,86 @@ EOF
     info "Detecting drives in root pool..."
     local root_drives
     
+    # Clean up any hung ZFS processes before detection
+    cleanup_zfs_processes
+    
     # Function to run ZFS commands with timeout
     run_zfs_command() {
         local cmd="$1"
         local timeout_duration=30
         info "Running: $cmd (timeout: ${timeout_duration}s)"
         
-        if timeout "$timeout_duration" bash -c "$cmd" 2>/dev/null; then
+        # Run command in background to get PID for cleanup if needed
+        if timeout --kill-after=5s "$timeout_duration" bash -c "$cmd" 2>/dev/null; then
             return 0
         else
             warning "Command timed out after ${timeout_duration}s: $cmd"
+            
+            # Clean up any hung processes from this command
+            local cmd_name
+            cmd_name=$(echo "$cmd" | awk '{print $1}')
+            if pgrep -f "$cmd_name" >/dev/null 2>&1; then
+                warning "Killing hung $cmd_name processes..."
+                pkill -9 -f "$cmd_name" 2>/dev/null || true
+                sleep 1
+            fi
+            
             return 1
         fi
     }
     
     # Verify ZFS is functional before attempting drive detection
     info "Verifying ZFS functionality..."
-    if ! timeout 10 zpool list >/dev/null 2>&1; then
-        warning "ZFS commands are not responding, trying to load modules..."
-        modprobe zfs || warning "Could not load ZFS module"
-        
-        if ! timeout 10 zpool list >/dev/null 2>&1; then
-            error_exit "ZFS is not functional. Cannot detect drives for GRUB installation."
+    local zfs_attempts=0
+    local max_attempts=3
+    
+    while [[ $zfs_attempts -lt $max_attempts ]]; do
+        if timeout 10 zpool list >/dev/null 2>&1; then
+            success "ZFS is functional"
+            break
+        else
+            ((zfs_attempts++))
+            warning "ZFS commands not responding (attempt $zfs_attempts/$max_attempts)"
+            
+            if [[ $zfs_attempts -lt $max_attempts ]]; then
+                warning "Attempting ZFS recovery..."
+                cleanup_zfs_processes
+                
+                # Try to load ZFS module
+                modprobe zfs 2>/dev/null || warning "Could not load ZFS module"
+                sleep 2
+            else
+                error_exit "ZFS is not functional after $max_attempts attempts. Cannot detect drives for GRUB installation."
+            fi
+        fi
+    done
+    
+    # Method 1: Try to get drives from cache first (fastest method)
+    info "Trying ZFS cache method..."
+    if [[ -f /etc/zfs/zpool.cache ]]; then
+        # Try to read drive info from cache without running zfs commands
+        local cache_drives
+        cache_drives=$(strings /etc/zfs/zpool.cache 2>/dev/null | grep -E '^/dev/(sd[a-z]+|nvme[0-9]+n[0-9]+)$' | sort -u | tr '\n' ' ')
+        if [[ -n "$cache_drives" ]]; then
+            root_drives="$cache_drives"
+            info "Found drives from ZFS cache: $root_drives"
         fi
     fi
-    success "ZFS is functional"
     
-    # Method 1: Look for drives with /dev/ prefix using zpool status
-    info "Trying zpool status method..."
-    if run_zfs_command "zpool status '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_status.tmp 2>&1"; then
-        root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_status.tmp | awk '{print $1}' | tr '\n' ' ')
-        info "Found drives with /dev/ prefix: $root_drives"
-    else
-        warning "zpool status command failed or timed out"
+    if [[ -z "$root_drives" ]]; then
+        # Method 2: Look for drives with /dev/ prefix using zpool status
+        info "Trying zpool status method..."
+        if run_zfs_command "zpool status '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_status.tmp 2>&1"; then
+            root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_status.tmp | awk '{print $1}' | tr '\n' ' ')
+            info "Found drives with /dev/ prefix: $root_drives"
+        else
+            warning "zpool status command failed or timed out"
+        fi
     fi
     
     if [[ -z "$root_drives" ]]; then
         info "No /dev/ prefixed drives found, trying alternative methods..."
-        # Method 2: Look for nvme/sd drives without /dev/ prefix and add it
+        # Method 3: Look for nvme/sd drives without /dev/ prefix and add it
         if [[ -f /tmp/zpool_status.tmp ]]; then
             root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_status.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
             info "Found drives without /dev/ prefix: $root_drives"
@@ -611,7 +725,7 @@ EOF
     
     if [[ -z "$root_drives" ]]; then
         info "Trying zpool list method..."
-        # Method 3: Try zpool list -v
+        # Method 4: Try zpool list -v
         if run_zfs_command "zpool list -v '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_list.tmp 2>&1"; then
             root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_list.tmp | awk '{print $1}' | tr '\n' ' ')
             info "Found drives using zpool list: $root_drives"
@@ -620,7 +734,7 @@ EOF
     
     if [[ -z "$root_drives" ]]; then
         info "Trying zpool list with device name detection..."
-        # Method 4: Try zpool list -v with device name detection
+        # Method 5: Try zpool list -v with device name detection
         if [[ -f /tmp/zpool_list.tmp ]]; then
             root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_list.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
             info "Found drives using zpool list without /dev/: $root_drives"
@@ -629,7 +743,7 @@ EOF
     
     if [[ -z "$root_drives" ]]; then
         warning "Could not detect drives from ZFS commands, attempting manual detection..."
-        # Method 5: Try to get drives from zpool cache
+        # Method 6: Try to get drives from zpool cache
         if [[ -f /etc/zfs/zpool.cache ]]; then
             info "Checking zpool cache..."
             if run_zfs_command "zdb -C '$ZFS_ROOT_POOL_NAME' >/tmp/zdb_output.tmp 2>&1"; then
@@ -644,6 +758,17 @@ EOF
         warning "All ZFS detection methods failed, using system drive detection..."
         root_drives=$(lsblk -nd -o NAME,TYPE | grep disk | awk '{print "/dev/" $1}' | head -2 | tr '\n' ' ')
         info "Using system drives: $root_drives"
+        
+        # Also try checking the original config for drives used in setup
+        if [[ -f /tmp/drives_used_for_zfs.txt ]]; then
+            info "Checking ZFS setup log for drives..."
+            local config_drives
+            config_drives=$(cat /tmp/drives_used_for_zfs.txt 2>/dev/null | tr '\n' ' ')
+            if [[ -n "$config_drives" ]]; then
+                info "Found drives from ZFS setup log: $config_drives"
+                root_drives="$config_drives"
+            fi
+        fi
     fi
     
     # Clean up temporary files
@@ -751,6 +876,7 @@ main() {
     # Check for debug flag
     if [[ "${1:-}" == "--debug" ]]; then
         debug_system_state
+        debug_zfs_state
         exit 0
     fi
     

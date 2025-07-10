@@ -93,11 +93,11 @@ analyze_drives() {
         echo "Size: ${size}GB - Drives: ${group_drives[*]} (${#group_drives[@]} drives)"
         
         if [[ ${#group_drives[@]} -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
-            echo "  → Will create ZFS mirror"
+            echo "  → Will add ZFS mirror vdev to rpool"
         elif [[ ${#group_drives[@]} -gt 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
-            echo "  → Will create multiple ZFS mirrors (pairs)"
+            echo "  → Will add multiple ZFS mirror vdevs to rpool (pairs)"
         else
-            echo "  → Will create individual ZFS pools"
+            echo "  → Will add individual vdevs to rpool"
         fi
     done
     echo
@@ -205,6 +205,39 @@ create_zfs_pool() {
     zfs set relatime="$ZFS_RELATIME" "$pool_name" || warning "Failed to set relatime on $pool_name"
     
     success "ZFS pool '$pool_name' created successfully"
+}
+
+# Add vdev to existing ZFS pool
+add_vdev_to_pool() {
+    local pool_name="$1"
+    local pool_type="$2"
+    shift 2
+    local drives=("$@")
+    
+    info "Adding $pool_type vdev to existing pool '$pool_name'..."
+    
+    # Check if pool exists
+    if ! zpool list "$pool_name" >/dev/null 2>&1; then
+        error_exit "Pool '$pool_name' does not exist"
+    fi
+    
+    # Build zpool add command
+    local cmd="zpool add $pool_name"
+    
+    # Add vdev configuration
+    if [[ "$pool_type" == "mirror" ]]; then
+        cmd="$cmd mirror"
+    fi
+    
+    # Add drives
+    for drive in "${drives[@]}"; do
+        cmd="$cmd $drive"
+    done
+    
+    info "Executing: $cmd"
+    eval "$cmd" || error_exit "Failed to add vdev to ZFS pool $pool_name"
+    
+    success "Added $pool_type vdev to pool '$pool_name' successfully"
 }
 
 # Configure ZFS datasets
@@ -316,6 +349,7 @@ setup_zfs_pools() {
     info "Setting up ZFS pools..."
     
     local pool_counter=1
+    local rpool_created=false
     
     while IFS= read -r size; do
         local drives
@@ -333,33 +367,27 @@ setup_zfs_pools() {
         
         # Create pools based on number of drives and configuration
         if [[ $num_drives -eq 1 ]]; then
-            # Single drive - create single pool
-            local pool_name
-            if [[ $pool_counter -eq 1 ]]; then
-                pool_name="$ZFS_ROOT_POOL_NAME"
+            # Single drive
+            if [[ "$rpool_created" == "false" ]]; then
+                # Create initial rpool
+                create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
+                create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+                rpool_created=true
             else
-                pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
-            fi
-            
-            create_zfs_pool "$pool_name" "single" "${drives[0]}"
-            
-            if [[ $pool_counter -eq 1 ]]; then
-                create_zfs_datasets "$pool_name"
+                # Add single drive to existing rpool
+                add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
             fi
             
         elif [[ $num_drives -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
-            # Two drives - create mirror
-            local pool_name
-            if [[ $pool_counter -eq 1 ]]; then
-                pool_name="$ZFS_ROOT_POOL_NAME"
+            # Two drives - create/add mirror
+            if [[ "$rpool_created" == "false" ]]; then
+                # Create initial rpool as mirror
+                create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
+                create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+                rpool_created=true
             else
-                pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
-            fi
-            
-            create_zfs_pool "$pool_name" "mirror" "${drives[@]}"
-            
-            if [[ $pool_counter -eq 1 ]]; then
-                create_zfs_datasets "$pool_name"
+                # Add mirror vdev to existing rpool
+                add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
             fi
             
         elif [[ $num_drives -gt 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
@@ -367,58 +395,63 @@ setup_zfs_pools() {
             local i=0
             while [[ $i -lt $num_drives ]]; do
                 if [[ $((i + 1)) -lt $num_drives ]]; then
-                    # Create mirror with pair
-                    local pool_name
-                    if [[ $pool_counter -eq 1 ]]; then
-                        pool_name="$ZFS_ROOT_POOL_NAME"
+                    # Create/add mirror with pair
+                    if [[ "$rpool_created" == "false" ]]; then
+                        # Create initial rpool as mirror
+                        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
+                        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+                        rpool_created=true
                     else
-                        pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+                        # Add mirror vdev to existing rpool
+                        add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
                     fi
-                    
-                    create_zfs_pool "$pool_name" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
-                    
-                    if [[ $pool_counter -eq 1 ]]; then
-                        create_zfs_datasets "$pool_name"
-                    fi
-                    
-                    pool_counter=$((pool_counter + 1))
                     i=$((i + 2))
                 else
-                    # Odd drive - create single pool
-                    local pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
-                    create_zfs_pool "$pool_name" "single" "${drives[$i]}"
-                    pool_counter=$((pool_counter + 1))
+                    # Odd drive - add as single vdev
+                    if [[ "$rpool_created" == "false" ]]; then
+                        # Create initial rpool
+                        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
+                        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+                        rpool_created=true
+                    else
+                        # Add single drive to existing rpool
+                        add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
+                    fi
                     i=$((i + 1))
                 fi
             done
-            continue  # Skip the pool_counter increment at the end
             
         else
-            # Create individual pools for each drive
+            # Create individual vdevs for each drive
             for drive in "${drives[@]}"; do
-                local pool_name
-                if [[ $pool_counter -eq 1 ]]; then
-                    pool_name="$ZFS_ROOT_POOL_NAME"
+                if [[ "$rpool_created" == "false" ]]; then
+                    # Create initial rpool
+                    create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
+                    create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+                    rpool_created=true
                 else
-                    pool_name="${ZFS_DATA_POOL_NAME}${pool_counter}"
+                    # Add single drive to existing rpool
+                    add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
                 fi
-                
-                create_zfs_pool "$pool_name" "single" "$drive"
-                
-                if [[ $pool_counter -eq 1 ]]; then
-                    create_zfs_datasets "$pool_name"
-                fi
-                
-                pool_counter=$((pool_counter + 1))
             done
-            continue  # Skip the pool_counter increment at the end
         fi
         
         pool_counter=$((pool_counter + 1))
         
     done < /tmp/drive_sizes.txt
     
-    success "All ZFS pools configured"
+    # Log all drives used in ZFS setup for later reference
+    info "Logging drives used in ZFS setup..."
+    {
+        echo "# Drives used in ZFS setup - $(date)"
+        while IFS= read -r size; do
+            local drives
+            read -ra drives < "/tmp/drives_${size}gb.txt"
+            printf '%s\n' "${drives[@]}"
+        done < /tmp/drive_sizes.txt
+    } > /tmp/drives_used_for_zfs.txt
+    
+    success "All ZFS vdevs configured in rpool"
 }
 
 # Display ZFS configuration
