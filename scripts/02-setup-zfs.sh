@@ -123,6 +123,9 @@ wipe_drive() {
     vgchange -an 2>/dev/null || true
     mdadm --stop --scan 2>/dev/null || true
     
+    # Clear ZFS labels first
+    zpool labelclear "$drive" 2>/dev/null || true
+    
     # Wipe filesystem signatures
     wipefs -a "$drive" 2>/dev/null || true
     
@@ -132,6 +135,9 @@ wipe_drive() {
     
     # Clear partition table
     sgdisk --zap-all "$drive" 2>/dev/null || true
+    
+    # Clear any remaining ZFS labels again
+    zpool labelclear "$drive" 2>/dev/null || true
     
     success "Drive $drive wiped"
 }
@@ -144,6 +150,25 @@ create_zfs_pool() {
     local drives=("$@")
     
     info "Creating ZFS pool '$pool_name' with type '$pool_type'..."
+    
+    # Check if pool already exists and destroy it
+    if zpool list "$pool_name" >/dev/null 2>&1; then
+        warning "Pool '$pool_name' already exists"
+        if [[ "${FORCE_INSTALL:-no}" == "yes" ]] || [[ "$WIPE_DRIVES" == "yes" ]]; then
+            info "Destroying existing pool '$pool_name'..."
+            zpool destroy "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+            success "Existing pool '$pool_name' destroyed"
+        else
+            read -p "Pool '$pool_name' exists. Destroy it? (type 'yes' to confirm): " confirm
+            if [[ "$confirm" == "yes" ]]; then
+                info "Destroying existing pool '$pool_name'..."
+                zpool destroy "$pool_name" || error_exit "Failed to destroy existing pool $pool_name"
+                success "Existing pool '$pool_name' destroyed"
+            else
+                error_exit "Cannot proceed with existing pool '$pool_name'. Installation cancelled."
+            fi
+        fi
+    fi
     
     # Build zpool create command with only valid pool properties
     local cmd="zpool create"
@@ -204,6 +229,35 @@ create_zfs_datasets() {
     zfs set relatime="$ZFS_RELATIME" "$pool_name/data" || warning "Failed to set relatime on data"
     
     success "ZFS datasets created for pool '$pool_name'"
+}
+
+# Check for existing ZFS pools and handle them
+check_existing_pools() {
+    info "Checking for existing ZFS pools..."
+    
+    local existing_pools
+    existing_pools=$(zpool list -H -o name 2>/dev/null || true)
+    
+    if [[ -n "$existing_pools" ]]; then
+        warning "Found existing ZFS pools: $existing_pools"
+        
+        if [[ "${FORCE_INSTALL:-no}" == "yes" ]] || [[ "$WIPE_DRIVES" == "yes" ]]; then
+            info "Force install enabled - will destroy existing pools when creating new ones"
+        else
+            echo
+            echo "The following ZFS pools exist and may conflict with installation:"
+            zpool list
+            echo
+            read -p "Continue with installation? Existing pools will be destroyed as needed (type 'yes' to confirm): " confirm
+            
+            if [[ "$confirm" != "yes" ]]; then
+                info "Installation cancelled by user"
+                exit 0
+            fi
+        fi
+    else
+        info "No existing ZFS pools found"
+    fi
 }
 
 # Setup ZFS pools based on drive analysis
@@ -335,6 +389,7 @@ display_zfs_status() {
 main() {
     info "Starting ZFS setup..."
     
+    check_existing_pools
     analyze_drives
     
     # Confirmation prompt
