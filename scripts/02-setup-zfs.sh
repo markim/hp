@@ -222,7 +222,7 @@ add_vdev_to_pool() {
     fi
     
     # Build zpool add command
-    local cmd="zpool add $pool_name"
+    local cmd="zpool add -f $pool_name"
     
     # Add vdev configuration
     if [[ "$pool_type" == "mirror" ]]; then
@@ -348,149 +348,126 @@ force_unmount_and_export_pool() {
 setup_zfs_pools() {
     info "Setting up ZFS pools..."
     
-    local pool_counter=1
-    local rpool_created=false
+    local remaining_drives=()
+    
+    # Find the best drive group to use for initial rpool
+    local best_size=""
     
     while IFS= read -r size; do
         local drives
         read -ra drives < "/tmp/drives_${size}gb.txt"
         local num_drives=${#drives[@]}
         
-        info "Processing ${num_drives} drive(s) of size ${size}GB: ${drives[*]}"
-        
-        # Create pools based on number of drives and configuration
-        if [[ $num_drives -eq 1 ]]; then
-            # Single drive
-            if [[ "$rpool_created" == "false" ]]; then
-                # Wipe drive before creating initial rpool
-                if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                    wipe_drive "${drives[0]}"
-                fi
-                # Create initial rpool
-                create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
-                create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
-                rpool_created=true
-            else
-                # Wipe drive before adding to existing rpool
-                if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                    wipe_drive "${drives[0]}"
-                fi
-                # Add single drive to existing rpool
-                add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
+        # Prefer larger drives and mirror-capable pairs for initial rpool
+        if [[ $num_drives -ge 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+            if [[ -z "$best_size" || $size -gt $best_size ]]; then
+                best_size="$size"
             fi
-            
-        elif [[ $num_drives -eq 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
-            # Two drives - create/add mirror
-            if [[ "$rpool_created" == "false" ]]; then
-                # Wipe drives before creating initial rpool
-                if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                    for drive in "${drives[@]}"; do
-                        wipe_drive "$drive"
-                    done
-                fi
-                # Create initial rpool as mirror
-                create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
-                create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
-                rpool_created=true
-            else
-                # Wipe drives before adding to existing rpool
-                if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                    for drive in "${drives[@]}"; do
-                        wipe_drive "$drive"
-                    done
-                fi
-                # Add mirror vdev to existing rpool
-                add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[@]}"
-            fi
-            
-        elif [[ $num_drives -gt 2 && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
-            # Multiple drives - create mirrors in pairs
-            local i=0
-            while [[ $i -lt $num_drives ]]; do
-                if [[ $((i + 1)) -lt $num_drives ]]; then
-                    # Create/add mirror with pair
-                    if [[ "$rpool_created" == "false" ]]; then
-                        # Wipe drives before creating initial rpool
-                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                            wipe_drive "${drives[$i]}"
-                            wipe_drive "${drives[$((i + 1))]}"
-                        fi
-                        # Create initial rpool as mirror
-                        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
-                        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
-                        rpool_created=true
-                    else
-                        # Wipe drives before adding to existing rpool
-                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                            wipe_drive "${drives[$i]}"
-                            wipe_drive "${drives[$((i + 1))]}"
-                        fi
-                        # Add mirror vdev to existing rpool
-                        add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[$i]}" "${drives[$((i + 1))]}"
-                    fi
-                    i=$((i + 2))
-                else
-                    # Odd drive - add as single vdev
-                    if [[ "$rpool_created" == "false" ]]; then
-                        # Wipe drive before creating initial rpool
-                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                            wipe_drive "${drives[$i]}"
-                        fi
-                        # Create initial rpool
-                        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
-                        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
-                        rpool_created=true
-                    else
-                        # Wipe drive before adding to existing rpool
-                        if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                            wipe_drive "${drives[$i]}"
-                        fi
-                        # Add single drive to existing rpool
-                        add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[$i]}"
-                    fi
-                    i=$((i + 1))
-                fi
-            done
-            
-        else
-            # Create individual vdevs for each drive
-            for drive in "${drives[@]}"; do
-                if [[ "$rpool_created" == "false" ]]; then
-                    # Wipe drive before creating initial rpool
-                    if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                        wipe_drive "$drive"
-                    fi
-                    # Create initial rpool
-                    create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
-                    create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
-                    rpool_created=true
-                else
-                    # Wipe drive before adding to existing rpool
-                    if [[ "$WIPE_DRIVES" == "yes" ]]; then
-                        wipe_drive "$drive"
-                    fi
-                    # Add single drive to existing rpool
-                    add_vdev_to_pool "$ZFS_ROOT_POOL_NAME" "single" "$drive"
-                fi
-            done
         fi
-        
-        pool_counter=$((pool_counter + 1))
-        
     done < /tmp/drive_sizes.txt
     
-    # Log all drives used in ZFS setup for later reference
-    info "Logging drives used in ZFS setup..."
-    {
-        echo "# Drives used in ZFS setup - $(date)"
-        while IFS= read -r size; do
+    # Create initial rpool with best available mirror pair
+    if [[ -n "$best_size" ]]; then
+        local drives
+        read -ra drives < "/tmp/drives_${best_size}gb.txt"
+        
+        info "Creating initial rpool with first mirror pair from ${best_size}GB drives: ${drives[0]} ${drives[1]}"
+        
+        # Wipe the first two drives
+        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+            wipe_drive "${drives[0]}"
+            wipe_drive "${drives[1]}"
+        fi
+        
+        # Create initial rpool as mirror with first two drives
+        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "mirror" "${drives[0]}" "${drives[1]}"
+        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+        
+        # Save remaining drives from this group for post-install
+        if [[ ${#drives[@]} -gt 2 ]]; then
+            for ((i=2; i<${#drives[@]}; i++)); do
+                remaining_drives+=("${drives[$i]}")
+            done
+        fi
+    else
+        # Fallback: use first available drive group
+        local first_size
+        first_size=$(head -n1 /tmp/drive_sizes.txt)
+        local drives
+        read -ra drives < "/tmp/drives_${first_size}gb.txt"
+        
+        info "No suitable mirror pairs found, creating single-drive rpool with: ${drives[0]}"
+        
+        if [[ "$WIPE_DRIVES" == "yes" ]]; then
+            wipe_drive "${drives[0]}"
+        fi
+        
+        create_zfs_pool "$ZFS_ROOT_POOL_NAME" "single" "${drives[0]}"
+        create_zfs_datasets "$ZFS_ROOT_POOL_NAME"
+        
+        # Save remaining drives for post-install
+        for ((i=1; i<${#drives[@]}; i++)); do
+            remaining_drives+=("${drives[$i]}")
+        done
+    fi
+    
+    # Add remaining drives from other size groups to the list
+    while IFS= read -r size; do
+        if [[ "$size" != "$best_size" ]]; then
             local drives
             read -ra drives < "/tmp/drives_${size}gb.txt"
-            printf '%s\n' "${drives[@]}"
-        done < /tmp/drive_sizes.txt
-    } > /tmp/drives_used_for_zfs.txt
+            remaining_drives+=("${drives[@]}")
+        fi
+    done < /tmp/drive_sizes.txt
     
-    success "All ZFS vdevs configured in rpool"
+    # Log remaining drives for post-install expansion
+    if [[ ${#remaining_drives[@]} -gt 0 ]]; then
+        info "Saving ${#remaining_drives[@]} remaining drives for post-install expansion..."
+        {
+            echo "# Remaining drives for post-install ZFS expansion - $(date)"
+            echo "# Run these commands after system boot to add remaining storage:"
+            echo "# "
+            
+            # Group remaining drives and suggest commands
+            declare -A remaining_groups
+            for drive in "${remaining_drives[@]}"; do
+                local size_gb
+                size_gb=$(get_drive_size_gb "$drive")
+                if [[ -z "${remaining_groups[$size_gb]:-}" ]]; then
+                    remaining_groups[$size_gb]="$drive"
+                else
+                    remaining_groups[$size_gb]="${remaining_groups[$size_gb]} $drive"
+                fi
+            done
+            
+            for size in "${!remaining_groups[@]}"; do
+                local group_drives
+                read -ra group_drives <<< "${remaining_groups[$size]}"
+                echo "# ${size}GB drives: ${group_drives[*]}"
+                
+                local i=0
+                while [[ $i -lt ${#group_drives[@]} ]]; do
+                    if [[ $((i + 1)) -lt ${#group_drives[@]} && "$AUTO_MIRROR" == "yes" && $size -ge $MIN_MIRROR_SIZE ]]; then
+                        # Pair for mirror
+                        echo "zpool add $ZFS_ROOT_POOL_NAME mirror ${group_drives[$i]} ${group_drives[$((i + 1))]}"
+                        i=$((i + 2))
+                    else
+                        # Single drive
+                        echo "zpool add $ZFS_ROOT_POOL_NAME ${group_drives[$i]}"
+                        i=$((i + 1))
+                    fi
+                done
+            done
+            
+            echo "# "
+            printf '%s\n' "${remaining_drives[@]}"
+        } > /tmp/remaining_drives_for_expansion.txt
+        
+        warning "Additional drives will be added after system boot"
+        warning "See /tmp/remaining_drives_for_expansion.txt for expansion commands"
+    fi
+    
+    success "Initial rpool created successfully"
 }
 
 # Display ZFS configuration
@@ -528,6 +505,9 @@ main() {
     display_zfs_status
     
     success "ZFS setup completed successfully!"
+    echo
+    echo "Initial rpool created with mirror redundancy."
+    echo "Additional drives saved for post-boot expansion - see /tmp/remaining_drives_for_expansion.txt"
     echo
     echo "Next step: Run ./scripts/03-install-proxmox.sh"
 }
