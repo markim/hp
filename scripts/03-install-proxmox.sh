@@ -377,7 +377,16 @@ configure_bootloader() {
     info "Configuring bootloader..."
     
     # Install GRUB
-    chroot "$mount_point" apt-get install -y grub-pc
+    info "Installing GRUB package..."
+    if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc" 2>&1; then
+        warning "GRUB installation may have failed or timed out, continuing..."
+    else
+        success "GRUB package installed successfully"
+    fi
+    
+    # Configure GRUB defaults to prevent interactive prompts
+    chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections"
+    chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections"
     
     # Configure GRUB for ZFS
     cat >> "$mount_point/etc/default/grub" << EOF
@@ -396,36 +405,66 @@ echo "Starting GRUB configuration..."
 
 # Set environment variables for ZFS
 export ZPOOL_VDEV_NAME_PATH=1
+export DEBIAN_FRONTEND=noninteractive
+
+# Function to run commands with timeout
+run_with_timeout() {
+    local timeout_duration=90
+    local cmd="$1"
+    echo "Running with timeout: $cmd"
+    
+    # Use timeout with kill signal fallback and redirect output
+    if timeout --kill-after=10s "$timeout_duration" bash -c "$cmd" 2>&1; then
+        return 0
+    else
+        echo "⚠ Command timed out after ${timeout_duration}s: $cmd"
+        return 1
+    fi
+}
 
 # Make sure ZFS modules are loaded
 if ! modprobe zfs 2>/dev/null; then
-    echo "Warning: Could not load ZFS module"
+    echo "Warning: Could not load ZFS module, trying to continue..."
 fi
 
 # Import the pool if not already imported
 if ! zpool list "$1" >/dev/null 2>&1; then
     echo "Importing ZFS pool $1..."
-    if ! zpool import -f "$1" 2>/dev/null; then
-        echo "Warning: Pool import failed or already imported"
+    if ! timeout 30 zpool import -f "$1" 2>/dev/null; then
+        echo "Warning: Pool import failed or timed out, continuing..."
     fi
 fi
 
+# Configure GRUB defaults for non-interactive mode
+echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections
+echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections
+
 # Update initramfs to include ZFS
 echo "Updating initramfs..."
-if update-initramfs -u -k all; then
+if run_with_timeout "update-initramfs -u -k all 2>&1"; then
     echo "✓ Initramfs updated successfully"
 else
-    echo "⚠ Warning: Initramfs update failed"
-    # Continue anyway as this might still work
+    echo "⚠ Warning: Initramfs update failed or timed out, trying fallback..."
+    # Try without all kernels
+    if run_with_timeout "update-initramfs -u 2>&1"; then
+        echo "✓ Initramfs updated with fallback method"
+    else
+        echo "⚠ Warning: All initramfs update attempts failed"
+    fi
 fi
 
-# Update GRUB configuration
+# Update GRUB configuration  
 echo "Updating GRUB configuration..."
-if update-grub; then
+if run_with_timeout "update-grub 2>&1"; then
     echo "✓ GRUB configuration updated"
 else
-    echo "⚠ Warning: GRUB configuration update failed"
-    # Try to continue with installation anyway
+    echo "⚠ Warning: GRUB configuration update failed or timed out, trying manual method..."
+    # Try manual grub config generation
+    if run_with_timeout "grub-mkconfig -o /boot/grub/grub.cfg 2>&1"; then
+        echo "✓ GRUB configuration created manually"
+    else
+        echo "⚠ Warning: All GRUB configuration attempts failed"
+    fi
 fi
 
 # Install GRUB to boot devices
@@ -438,7 +477,7 @@ for drive in $2; do
     drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
     if [[ -n "$drive" && -b "$drive" ]]; then
         echo "Installing GRUB to $drive"
-        if grub-install --target=i386-pc "$drive" 2>/dev/null; then
+        if run_with_timeout "grub-install --target=i386-pc --force $drive 2>&1"; then
             echo "✓ GRUB installed successfully to $drive"
             ((installed_drives++))
         else
@@ -480,10 +519,11 @@ EOF
     # Run GRUB configuration in chroot with better error handling
     if [[ -n "$root_drives" ]]; then
         info "Running GRUB configuration script..."
-        if chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives"; then
+        # Set a longer timeout for the complete GRUB configuration process
+        if timeout --kill-after=30s 300s chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives" 2>&1; then
             success "GRUB configuration completed successfully"
         else
-            warning "GRUB configuration script failed, attempting manual recovery..."
+            warning "GRUB configuration script failed or timed out after 5 minutes, attempting manual recovery..."
             
             # Ensure chroot environment is still set up
             mount --bind /dev "$mount_point/dev" 2>/dev/null || true
@@ -492,21 +532,25 @@ EOF
             
             # Manual GRUB installation as fallback
             info "Performing manual GRUB configuration..."
-            chroot "$mount_point" bash -c "modprobe zfs || true"
-            chroot "$mount_point" bash -c "zpool import -f '$ZFS_ROOT_POOL_NAME' || true"
+            chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive modprobe zfs || true"
+            chroot "$mount_point" bash -c "timeout 30 zpool import -f '$ZFS_ROOT_POOL_NAME' || true"
             
             info "Updating initramfs manually..."
-            chroot "$mount_point" bash -c "update-initramfs -u -k all || echo 'Initramfs update failed'"
+            if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive update-initramfs -u -k all"; then
+                warning "Initramfs update timed out or failed"
+            fi
             
             info "Updating GRUB configuration manually..."
-            chroot "$mount_point" bash -c "update-grub || echo 'GRUB update failed'"
+            if ! timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive update-grub"; then
+                warning "GRUB configuration update timed out or failed"
+            fi
             
             # Install GRUB to each drive individually
             for drive in $root_drives; do
                 drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
                 if [[ -n "$drive" && -b "$drive" ]]; then
                     info "Installing GRUB to $drive manually..."
-                    if chroot "$mount_point" grub-install --target=i386-pc "$drive"; then
+                    if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=i386-pc --force $drive"; then
                         success "GRUB installed to $drive"
                     else
                         warning "Failed to install GRUB to $drive - system may not boot from this drive"
@@ -604,6 +648,12 @@ resume_from_bootloader() {
 
 # Main function
 main() {
+    # Check for resume argument
+    if [[ "${1:-}" == "--resume-bootloader" ]]; then
+        resume_from_bootloader
+        return
+    fi
+    
     info "Starting Proxmox installation..."
     
     check_root_pool
