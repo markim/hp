@@ -123,3 +123,7 @@ zpool export rpool 2>/dev/null || true
 - `config/server-config.conf.example` - Shows all configuration scenarios
 - `scripts/00-rescue-zfs.sh` - Handles complex ZFS extraction from rescue system
 - `Makefile` - Provides all operational commands
+
+- Never make a --resume type command, I want this to be run from the start every time
+- Never create a test script, only the project scripts will be used
+- Never make documentation.

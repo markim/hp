@@ -520,20 +520,30 @@ EOF
     # Get the list of drives in the root pool
     info "Detecting drives in root pool..."
     local root_drives
+    
+    # Method 1: Look for drives with /dev/ prefix
     root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
     
     if [[ -z "$root_drives" ]]; then
-        # Try alternative method to get drives
+        info "No /dev/ prefixed drives found, trying alternative methods..."
+        # Method 2: Look for nvme/sd drives without /dev/ prefix and add it
+        root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' | awk '{print "/dev/" $1}' | tr '\n' ' ')
+    fi
+    
+    if [[ -z "$root_drives" ]]; then
+        info "Trying zpool list method..."
+        # Method 3: Try zpool list -v
         root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+/dev/' | awk '{print $1}' | tr '\n' ' ')
     fi
     
     if [[ -z "$root_drives" ]]; then
-        # Final fallback - try to get drives from zpool status with different pattern
-        root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+sd|^\s+nvme' | awk '{print "/dev/" $1}' | tr '\n' ' ')
+        info "Trying zpool list with device name detection..."
+        # Method 4: Try zpool list -v with device name detection
+        root_drives=$(zpool list -v "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' | awk '{print "/dev/" $1}' | tr '\n' ' ')
     fi
     
     if [[ -z "$root_drives" ]]; then
-        warning "Could not detect drives in root pool, attempting to continue with manual detection..."
+        warning "Could not detect drives in root pool, attempting manual detection..."
         # Last resort: try to find the drives manually
         root_drives=$(lsblk -nd -o NAME,TYPE | grep disk | awk '{print "/dev/" $1}' | head -2 | tr '\n' ' ')
     fi
@@ -635,67 +645,8 @@ cleanup_chroot() {
     success "Cleanup completed"
 }
 
-# Resume installation from bootloader configuration
-resume_from_bootloader() {
-    info "Resuming installation from bootloader configuration..."
-    
-    # Check if root pool exists
-    if ! zpool list "$ZFS_ROOT_POOL_NAME" >/dev/null 2>&1; then
-        error_exit "Root ZFS pool '$ZFS_ROOT_POOL_NAME' not found. Cannot resume installation."
-    fi
-    
-    # Check if Proxmox is already installed
-    local mount_point="/mnt/proxmox"
-    local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
-    
-    # Mount the filesystem if not already mounted
-    if ! mountpoint -q "$mount_point"; then
-        mkdir -p "$mount_point"
-        zfs set mountpoint="$mount_point" "$root_fs" 2>/dev/null || true
-        
-        if ! zfs mount "$root_fs" 2>/dev/null; then
-            mount -t zfs "$root_fs" "$mount_point" || error_exit "Failed to mount root filesystem for resume"
-        fi
-    fi
-    
-    # Check if this is a valid Proxmox installation
-    if [[ ! -f "$mount_point/usr/bin/pvesh" ]]; then
-        error_exit "Proxmox installation not found in mounted filesystem. Cannot resume."
-    fi
-    
-    setup_chroot
-    configure_bootloader
-    configure_ssh
-    cleanup_chroot
-    
-    success "Installation resumed and completed!"
-    echo
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  PROXMOX INSTALLATION RESUMED!       ${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    echo
-    echo -e "${BLUE}Next steps:${NC}"
-    echo -e "${BLUE}1.${NC} Run the post-installation script:"
-    echo -e "   ${YELLOW}./scripts/04-post-install.sh${NC}"
-    echo
-    echo -e "${BLUE}2.${NC} After post-install completes, you will need to:"
-    echo -e "   ${YELLOW}reboot${NC}"
-    echo
-    echo -e "${BLUE}3.${NC} The system should boot into Proxmox VE"
-    echo -e "   Access the web interface at: ${YELLOW}https://$(ip route get 1.1.1.1 | grep src | awk '{print $7}'):8006${NC}"
-    echo
-    echo -e "${GREEN}Installation log available at: ${YELLOW}/tmp/proxmox-install.log${NC}"
-    echo
-}
-
 # Main function
 main() {
-    # Check for resume argument
-    if [[ "${1:-}" == "--resume-bootloader" ]]; then
-        resume_from_bootloader
-        return
-    fi
-    
     info "Starting Proxmox installation..."
     
     check_root_pool
