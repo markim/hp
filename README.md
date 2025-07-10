@@ -28,6 +28,19 @@ chmod +x install.sh
 ./install.sh
 ```
 
+**If you encounter ZFS/kernel compatibility issues:**
+
+```bash
+# Clean up any broken packages
+./scripts/cleanup-zfs.sh
+
+# Test ZFS functionality
+./scripts/test-zfs.sh
+
+# Retry installation
+./install.sh
+```
+
 ## Manual Installation
 
 If you prefer to run the process step by step:

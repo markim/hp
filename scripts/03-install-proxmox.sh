@@ -160,7 +160,16 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     chrony
 
 # Install ZFS utilities
-apt-get install -y zfsutils-linux
+apt-get install -y zfsutils-linux || {
+    echo "Warning: Could not install zfsutils-linux package, will copy from rescue system"
+    # Copy ZFS binaries from rescue system if package installation fails
+    if [[ -d /tmp/zfs-rescue ]]; then
+        cp /tmp/zfs-rescue/zfs /usr/sbin/ 2>/dev/null || true
+        cp /tmp/zfs-rescue/zpool /usr/sbin/ 2>/dev/null || true
+        cp -r /tmp/zfs-rescue/lib/* /usr/lib/ 2>/dev/null || true
+        chmod +x /usr/sbin/zfs /usr/sbin/zpool
+    fi
+}
 
 # Configure ZFS to import pools on boot
 systemctl enable zfs-import-cache
