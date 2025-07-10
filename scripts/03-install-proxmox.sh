@@ -143,7 +143,27 @@ install_base_system() {
     # Install base system
     debootstrap --arch=amd64 bookworm "$mount_point" http://deb.debian.org/debian || error_exit "Failed to install base system"
     
-    success "Base system installed"
+    # Install essential tools that are needed for the installation
+    info "Installing essential tools in chroot..."
+    
+    # Mount necessary filesystems for package installation
+    mount --bind /dev "$mount_point/dev"
+    mount --bind /proc "$mount_point/proc"
+    mount --bind /sys "$mount_point/sys"
+    
+    # Copy DNS configuration for package downloads
+    cp /etc/resolv.conf "$mount_point/etc/resolv.conf"
+    
+    # Install essential packages
+    chroot "$mount_point" apt-get update
+    chroot "$mount_point" apt-get install -y wget curl gnupg2 ca-certificates
+    
+    # Unmount filesystems (will be remounted later in setup_chroot)
+    umount "$mount_point/sys" || true
+    umount "$mount_point/proc" || true
+    umount "$mount_point/dev" || true
+    
+    success "Base system and essential tools installed"
 }
 
 # Configure chroot environment
