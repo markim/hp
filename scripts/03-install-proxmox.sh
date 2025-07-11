@@ -951,11 +951,6 @@ else
                 echo "⚠ Warning: Failed to install GRUB to $drive"
                 ((failed_drives++))
             fi
-                ((installed_drives++))
-            else
-                echo "⚠ Warning: Failed to install GRUB to $drive"
-                ((failed_drives++))
-            fi
         else
             echo "⚠ Skipping invalid drive: '$drive'"
         fi
