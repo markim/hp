@@ -184,6 +184,10 @@ create_zfs_pool() {
     # Build zpool create command with only valid pool properties
     local cmd="zpool create"
     
+    # Add GRUB compatibility for bootable pools (critical for GRUB to read ZFS)
+    # This ensures only GRUB-supported ZFS features are enabled
+    cmd="$cmd -o compatibility=grub2"
+    
     # Add only valid pool options (not dataset options)
     cmd="$cmd -o ashift=12"
     
