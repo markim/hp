@@ -5,7 +5,8 @@
 # SCENARIO 1: Basic Setup (Most Common)
 # ===========================================
 # Use this for most installations where you want:
-# - Automatic drive detection and mirroring
+# - Automatic drive detection and mirroring in single rpool
+# - All drives added to rpool with mirror vdevs (mirror-0, mirror-1, etc.)
 # - Default ZFS settings optimized for Proxmox
 # - Current network configuration preserved
 
@@ -24,7 +25,7 @@ ZFS_COMPRESSION="lz4"
 ZFS_ATIME="off"
 ZFS_RELATIME="on"
 
-# Enable automatic mirroring for drives >= 100GB
+# Enable automatic mirroring for drives >= 100GB (added to single rpool)
 AUTO_MIRROR="yes"
 MIN_MIRROR_SIZE="100"
 
@@ -60,9 +61,9 @@ DISABLE_ENTERPRISE_REPO="yes"
 # ===========================================
 # SCENARIO 3: Mixed Drive Sizes
 # ===========================================
-# For servers with different drive sizes:
+# For servers with different drive sizes (all added to single rpool):
 
-# Only mirror drives larger than 500GB
+# Only mirror drives larger than 500GB (smaller drives added as single vdevs)
 # MIN_MIRROR_SIZE="500"
 
 # Exclude specific drives (e.g., system drives)

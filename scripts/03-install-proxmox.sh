@@ -356,6 +356,10 @@ apt-get update
 # Install Proxmox kernel and packages
 apt-get install -y \
     proxmox-ve \
+    pve-manager \
+    pve-qemu-kvm \
+    pve-container \
+    pve-firmware \
     postfix \
     open-iscsi \
     chrony
@@ -387,6 +391,14 @@ if [[ "$zfs_package_success" != "true" ]]; then
     if [[ -f /tmp/install-rescue-zfs.sh ]]; then
         echo "Installing ZFS from rescue system..."
         if /tmp/install-rescue-zfs.sh; then
+            echo "✓ Rescue system ZFS installed successfully"
+        else
+            echo "⚠ Warning: Rescue system ZFS installation failed"
+            # Try to continue anyway
+        fi
+    elif [[ -f "$SCRIPT_DIR/scripts/00-rescue-zfs.sh" ]]; then
+        echo "Installing ZFS from rescue script..."
+        if "$SCRIPT_DIR/scripts/00-rescue-zfs.sh"; then
             echo "✓ Rescue system ZFS installed successfully"
         else
             echo "⚠ Warning: Rescue system ZFS installation failed"
@@ -629,6 +641,11 @@ configure_bootloader() {
     # Configure GRUB for ZFS
     info "Configuring GRUB for ZFS..."
     
+    # Setup ZFS environment before GRUB operations
+    info "Setting up ZFS environment for bootloader configuration..."
+    fix_zfs_environment
+    import_zfs_pool "$ZFS_ROOT_POOL_NAME"
+    
     # Ensure we have the correct ZFS root dataset path
     local zfs_root_dataset="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
     
@@ -688,15 +705,18 @@ run_with_timeout() {
 use_rescue_zfs() {
     echo "Checking for rescue system ZFS availability..."
     
-    # Check if rescue ZFS binaries are available
-    if [[ -d /tmp/zfs-rescue ]] && [[ -f /tmp/zfs-rescue/install-rescue-zfs.sh ]]; then
+    # Check if we have the rescue ZFS script
+    local rescue_script="${SCRIPT_DIR}/scripts/00-rescue-zfs.sh"
+    if [[ -f "$rescue_script" ]]; then
         echo "Installing rescue system ZFS..."
-        if /tmp/zfs-rescue/install-rescue-zfs.sh; then
+        if "$rescue_script"; then
             echo "✓ Rescue system ZFS installed successfully"
             return 0
         else
             echo "⚠ Rescue system ZFS installation failed"
         fi
+    else
+        echo "⚠ Rescue ZFS script not found at $rescue_script"
     fi
     
     return 1
@@ -748,11 +768,23 @@ import_zfs_pool() {
         return 0
     fi
     
+    # Ensure ZFS module is loaded before attempting import
+    if ! lsmod | grep -q "^zfs "; then
+        echo "ZFS module not loaded, attempting to load..."
+        if ! modprobe zfs 2>/dev/null; then
+            echo "⚠ Warning: Failed to load ZFS module, pool import may fail"
+        else
+            echo "✓ ZFS module loaded successfully"
+            # Give module time to initialize
+            sleep 3
+        fi
+    fi
+    
     # Try to import the pool
     echo "Pool not found, attempting import..."
     
-    # Method 1: Simple import
-    if timeout 30 zpool import -f "$pool_name" 2>/dev/null; then
+    # Method 1: Simple import with longer timeout
+    if timeout 60 zpool import -f "$pool_name" 2>/dev/null; then
         echo "✓ Pool imported successfully"
         return 0
     fi
@@ -760,19 +792,22 @@ import_zfs_pool() {
     # Method 2: Import by looking for pools
     echo "Simple import failed, scanning for pools..."
     local available_pools
-    if available_pools=$(timeout 30 zpool import 2>/dev/null | grep "pool:" | awk '{print $2}' | head -5); then
+    if available_pools=$(timeout 60 zpool import 2>/dev/null | grep "pool:" | awk '{print $2}' | head -10); then
         if echo "$available_pools" | grep -q "^$pool_name$"; then
             echo "Found pool in scan, importing..."
-            if timeout 30 zpool import -f "$pool_name" 2>/dev/null; then
+            if timeout 60 zpool import -f "$pool_name" 2>/dev/null; then
                 echo "✓ Pool imported after scan"
                 return 0
             fi
+        else
+            echo "Available pools found: $available_pools"
+            echo "Target pool $pool_name not found in scan"
         fi
     fi
     
     # Method 3: Import with directory scan (last resort)
     echo "Standard import failed, trying directory scan..."
-    if timeout 30 zpool import -d /dev -f "$pool_name" 2>/dev/null; then
+    if timeout 60 zpool import -d /dev -f "$pool_name" 2>/dev/null; then
         echo "✓ Pool imported with directory scan"
         return 0
     fi
@@ -780,10 +815,6 @@ import_zfs_pool() {
     echo "⚠ Warning: Could not import pool $pool_name, continuing without import"
     return 1
 }
-
-# Setup ZFS environment before GRUB operations
-fix_zfs_environment
-import_zfs_pool "$1"
 
 # Update initramfs to include ZFS
 echo "Updating initramfs (this may take a few minutes)..."
@@ -810,7 +841,7 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=5
 GRUB_DISTRIBUTOR="Proxmox VE"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="root=ZFS=$1/ROOT/pve-1 boot=zfs"
+GRUB_CMDLINE_LINUX="root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs"
 GRUB_DISABLE_OS_PROBER=true
 GRUB_DISABLE_RECOVERY=true
 GRUB_EOF
@@ -836,12 +867,12 @@ set timeout=5
 set default=0
 
 menuentry "Proxmox VE" {
-    linux /boot/vmlinuz root=ZFS=$1/ROOT/pve-1 boot=zfs quiet
+    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs quiet
     initrd /boot/initrd.img
 }
 
 menuentry "Proxmox VE (Recovery)" {
-    linux /boot/vmlinuz root=ZFS=$1/ROOT/pve-1 boot=zfs single
+    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs single
     initrd /boot/initrd.img
 }
 MINIMAL_GRUB_EOF
