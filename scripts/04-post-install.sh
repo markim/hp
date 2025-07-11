@@ -71,17 +71,70 @@ success() {
 import_zfs_pools() {
     info "Importing ZFS pools..."
     
-    # Force import all pools
-    for pool in $(zpool import 2>&1 | grep "pool:" | awk '{print $2}'); do
-        if ! zpool list "$pool" >/dev/null 2>&1; then
-            zpool import -f "$pool" || true
-        fi
+    # Wait for ZFS module to be available
+    local timeout=30
+    local count=0
+    while ! modinfo zfs >/dev/null 2>&1 && [ $count -lt $timeout ]; do
+        info "Waiting for ZFS module to be available..."
+        sleep 1
+        ((count++))
     done
     
-    # Set cachefile
-    zpool set cachefile=/etc/zfs/zpool.cache rpool 2>/dev/null || true
+    if ! modinfo zfs >/dev/null 2>&1; then
+        info "ZFS module not found, attempting to load..."
+        modprobe zfs || true
+    fi
     
-    success "ZFS pools imported"
+    # Try to import all available pools
+    info "Scanning for importable ZFS pools..."
+    
+    # First, try to import by scanning all devices
+    local pools_to_import
+    pools_to_import=$(zpool import 2>&1 | grep "pool:" | awk '{print $2}' || true)
+    
+    if [[ -n "$pools_to_import" ]]; then
+        for pool in $pools_to_import; do
+            if ! zpool list "$pool" >/dev/null 2>&1; then
+                info "Importing ZFS pool: $pool"
+                if zpool import -f "$pool" 2>/dev/null; then
+                    info "Successfully imported pool: $pool"
+                else
+                    info "Failed to import pool: $pool, trying with force and all devices"
+                    zpool import -f -a 2>/dev/null || true
+                fi
+            else
+                info "Pool $pool already imported"
+            fi
+        done
+    else
+        info "No pools found for import, trying force import all"
+        zpool import -f -a 2>/dev/null || true
+    fi
+    
+    # Verify that the root pool is available
+    if zpool list rpool >/dev/null 2>&1; then
+        info "Root pool 'rpool' is available"
+        
+        # Set cachefile for persistence
+        zpool set cachefile=/etc/zfs/zpool.cache rpool 2>/dev/null || true
+        
+        # Set other pools' cachefile too
+        for pool in $(zpool list -H -o name 2>/dev/null); do
+            if [[ "$pool" != "rpool" ]]; then
+                zpool set cachefile=/etc/zfs/zpool.cache "$pool" 2>/dev/null || true
+            fi
+        done
+    else
+        info "Warning: Root pool 'rpool' not found, system may have boot issues"
+    fi
+    
+    # Enable ZFS services
+    systemctl enable zfs-import-cache.service 2>/dev/null || true
+    systemctl enable zfs-import.target 2>/dev/null || true
+    systemctl enable zfs-mount.service 2>/dev/null || true
+    systemctl enable zfs.target 2>/dev/null || true
+    
+    success "ZFS pools imported and services enabled"
 }
 
 # Configure Proxmox repositories
@@ -341,15 +394,71 @@ verify_installation() {
         error_exit "Proxmox not properly installed"
     fi
     
-    # Check bootloader
-    local root_drives
-    root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" | grep -E '^\s+sd|^\s+nvme' | awk '{print "/dev/" $1}')
+    # Check for essential Proxmox files
+    local essential_files=(
+        "$mount_point/etc/pve"
+        "$mount_point/usr/share/proxmox-ve"
+        "$mount_point/usr/bin/qm"
+        "$mount_point/usr/bin/pct"
+    )
     
-    for drive in $root_drives; do
-        if ! chroot "$mount_point" grub-probe "$drive" >/dev/null 2>&1; then
-            warning "GRUB may not be properly installed on $drive"
+    for file in "${essential_files[@]}"; do
+        if [[ ! -e "$file" ]]; then
+            warning "Essential Proxmox component missing: $file"
         fi
     done
+    
+    # Check bootloader installation (with better error handling)
+    info "Checking bootloader installation..."
+    local root_drives
+    root_drives=$(zpool status "$ZFS_ROOT_POOL_NAME" 2>/dev/null | grep -E '^\s+(sd|nvme|ada)' | awk '{print "/dev/" $1}' | sort -u)
+    
+    if [[ -z "$root_drives" ]]; then
+        warning "Could not determine root drives from ZFS pool status"
+    else
+        for drive in $root_drives; do
+            # Check if drive exists
+            if [[ ! -b "$drive" ]]; then
+                warning "Drive $drive not found as block device"
+                continue
+            fi
+            
+            # Check for GRUB installation with better error handling
+            if ! chroot "$mount_point" grub-probe "$drive" >/dev/null 2>&1; then
+                warning "GRUB may not be properly installed on $drive"
+                
+                # Try to verify GRUB files exist
+                if [[ -f "$mount_point/boot/grub/grub.cfg" ]]; then
+                    info "GRUB configuration file exists"
+                else
+                    warning "GRUB configuration file missing"
+                fi
+            else
+                success "GRUB appears to be properly installed on $drive"
+            fi
+        done
+    fi
+    
+    # Check if ZFS root filesystem is properly configured
+    local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+    if zfs list "$root_fs" >/dev/null 2>&1; then
+        success "ZFS root filesystem exists and is accessible"
+    else
+        warning "ZFS root filesystem may not be properly configured"
+    fi
+    
+    # Check kernel and initramfs
+    if [[ -d "$mount_point/boot" ]] && ls "$mount_point"/boot/vmlinuz-* >/dev/null 2>&1; then
+        success "Kernel images found in /boot"
+    else
+        warning "No kernel images found in /boot"
+    fi
+    
+    if [[ -d "$mount_point/boot" ]] && ls "$mount_point"/boot/initrd.img-* >/dev/null 2>&1; then
+        success "Initramfs images found in /boot"
+    else
+        warning "No initramfs images found in /boot"
+    fi
     
     success "Installation verification completed"
 }
@@ -420,24 +529,98 @@ final_cleanup() {
     # Unmount any remaining filesystems
     umount /mnt/proxmox-iso 2>/dev/null || true
     
-    # Carefully unmount the main ZFS filesystem
     local mount_point="/mnt/proxmox"
-    if mountpoint -q "$mount_point" 2>/dev/null; then
-        info "Unmounting $mount_point for clean reboot..."
-        if ! umount "$mount_point" 2>/dev/null; then
-            warning "Could not unmount $mount_point cleanly, will export pool instead"
-        else
-            success "Unmounted $mount_point successfully"
+    
+    # Clean up chroot mounts first (these might be left over from script 03)
+    info "Cleaning up any remaining chroot mounts..."
+    for mount in dev/pts dev proc sys; do
+        if mountpoint -q "$mount_point/$mount" 2>/dev/null; then
+            info "Unmounting $mount_point/$mount..."
+            umount "$mount_point/$mount" 2>/dev/null || umount -f "$mount_point/$mount" 2>/dev/null || true
+        fi
+    done
+    
+    # Kill any processes that might be using the mount point
+    info "Checking for processes using $mount_point..."
+    
+    # Install psmisc if fuser is not available (for process cleanup)
+    if ! command -v fuser >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+        info "Installing psmisc for process cleanup..."
+        apt-get update >/dev/null 2>&1 || true
+        apt-get install -y psmisc >/dev/null 2>&1 || true
+    fi
+    
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -km "$mount_point" 2>/dev/null || true
+        sleep 2
+    elif command -v lsof >/dev/null 2>&1; then
+        # Kill processes using the mount point
+        local pids
+        pids=$(lsof +D "$mount_point" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+        if [[ -n "$pids" ]]; then
+            info "Killing processes using $mount_point: $pids"
+            echo "$pids" | xargs -r kill -9 2>/dev/null || true
+            sleep 2
         fi
     fi
     
+    # Sync and wait for any pending I/O
+    sync
+    sleep 1
+    
+    # Try to unmount the ZFS filesystem with multiple attempts
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        info "Unmounting $mount_point for clean reboot..."
+        
+        # First attempt - normal unmount
+        if umount "$mount_point" 2>/dev/null; then
+            success "Unmounted $mount_point successfully"
+        else
+            warning "Normal unmount failed, trying lazy unmount..."
+            if umount -l "$mount_point" 2>/dev/null; then
+                success "Lazy unmount of $mount_point successful"
+            else
+                warning "Lazy unmount failed, trying force unmount..."
+                if umount -f "$mount_point" 2>/dev/null; then
+                    success "Force unmount of $mount_point successful"
+                else
+                    warning "Could not unmount $mount_point - ZFS will handle this on reboot"
+                fi
+            fi
+        fi
+    fi
+    
+    # Wait a moment before trying to export pools
+    sleep 2
+    
+    # Try to set ZFS filesystem to legacy mount to help with export
+    info "Setting ZFS filesystem to legacy mount for clean export..."
+    zfs set mountpoint=legacy "$ZFS_ROOT_POOL_NAME/ROOT/pve-1" 2>/dev/null || true
+    
     # Export ZFS pools for clean reboot
     info "Exporting ZFS pools for clean reboot..."
+    
+    # Export main pool
     if zpool export "$ZFS_ROOT_POOL_NAME" 2>/dev/null; then
         success "Exported $ZFS_ROOT_POOL_NAME successfully"
     else
-        warning "Could not export $ZFS_ROOT_POOL_NAME - pools will auto-import on reboot"
+        # Try force export if normal export fails
+        if zpool export -f "$ZFS_ROOT_POOL_NAME" 2>/dev/null; then
+            success "Force exported $ZFS_ROOT_POOL_NAME successfully"
+        else
+            warning "Could not export $ZFS_ROOT_POOL_NAME - pools will auto-import on reboot"
+        fi
     fi
+    
+    # Export any additional pools
+    for pool in $(zpool list -H -o name 2>/dev/null | grep -v "^$ZFS_ROOT_POOL_NAME$"); do
+        info "Exporting additional pool: $pool"
+        if zpool export "$pool" 2>/dev/null; then
+            success "Exported $pool successfully"
+        else
+            zpool export -f "$pool" 2>/dev/null || warning "Could not export $pool"
+        fi
+    done
     
     success "Cleanup completed - system ready for reboot"
 }
@@ -470,6 +653,12 @@ main() {
     else
         # Try to mount the ZFS filesystem
         info "Mounting ZFS root filesystem for post-install configuration..."
+        
+        # First ensure the pool is imported
+        if ! zpool list "$ZFS_ROOT_POOL_NAME" >/dev/null 2>&1; then
+            info "Importing ZFS pool $ZFS_ROOT_POOL_NAME..."
+            zpool import -f "$ZFS_ROOT_POOL_NAME" 2>/dev/null || error_exit "Failed to import ZFS pool $ZFS_ROOT_POOL_NAME"
+        fi
         
         # Set mountpoint and try to mount
         if ! zfs set mountpoint="$mount_point" "$root_fs" 2>/dev/null; then
