@@ -153,22 +153,42 @@ main() {
     fi
     
     info "Step 1: Preparing system..."
-    bash "${SCRIPT_DIR}/scripts/01-prepare-system.sh"
+    if ! bash "${SCRIPT_DIR}/scripts/01-prepare-system.sh"; then
+        error_exit "Step 1 failed: System preparation failed"
+    fi
     
     info "Step 2: Setting up ZFS..."
-    bash "${SCRIPT_DIR}/scripts/02-setup-zfs.sh"
+    if ! bash "${SCRIPT_DIR}/scripts/02-setup-zfs.sh"; then
+        error_exit "Step 2 failed: ZFS setup failed"
+    fi
     
     info "Step 3: Installing Proxmox..."
-    bash "${SCRIPT_DIR}/scripts/03-install-proxmox.sh"
+    if ! bash "${SCRIPT_DIR}/scripts/03-install-proxmox.sh"; then
+        warning "Step 3 had issues but continuing with post-installation..."
+        log "WARNING: Proxmox installation had issues, attempting post-install anyway"
+    fi
     
     info "Step 4: Post-installation configuration..."
-    bash "${SCRIPT_DIR}/scripts/04-post-install.sh"
+    if ! bash "${SCRIPT_DIR}/scripts/04-post-install.sh"; then
+        warning "Step 4 had issues but installation may still be usable"
+        log "WARNING: Post-installation had issues"
+    fi
     
-    success "Installation completed successfully!"
+    success "Installation process completed!"
     echo
-    echo -e "${GREEN}Your Proxmox server is ready!${NC}"
-    echo "Please reboot the system to complete the installation."
-    echo "After reboot, you can access Proxmox at: https://$(hostname -I | awk '{print $1}'):8006"
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}  INSTALLATION PROCESS COMPLETED!     ${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo
+    echo -e "${BLUE}Your Proxmox server installation is ready!${NC}"
+    echo -e "${YELLOW}Please check the logs above for any warnings.${NC}"
+    echo
+    echo -e "${BLUE}Next steps:${NC}"
+    echo "1. Remove rescue system from Hetzner Robot boot order"
+    echo "2. Reboot the system: ${YELLOW}reboot${NC}"
+    echo "3. After reboot, access Proxmox at: ${YELLOW}https://$(hostname -I | awk '{print $1}'):8006${NC}"
+    echo
+    echo -e "${GREEN}Installation log: ${YELLOW}/tmp/proxmox-install.log${NC}"
 }
 
 # Run main function

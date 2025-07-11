@@ -419,17 +419,44 @@ final_cleanup() {
     
     # Unmount any remaining filesystems
     umount /mnt/proxmox-iso 2>/dev/null || true
-    umount /mnt/proxmox 2>/dev/null || true
+    
+    # Carefully unmount the main ZFS filesystem
+    local mount_point="/mnt/proxmox"
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        info "Unmounting $mount_point for clean reboot..."
+        if ! umount "$mount_point" 2>/dev/null; then
+            warning "Could not unmount $mount_point cleanly, will export pool instead"
+        else
+            success "Unmounted $mount_point successfully"
+        fi
+    fi
     
     # Export ZFS pools for clean reboot
-    zpool export "$ZFS_ROOT_POOL_NAME" 2>/dev/null || true
+    info "Exporting ZFS pools for clean reboot..."
+    if zpool export "$ZFS_ROOT_POOL_NAME" 2>/dev/null; then
+        success "Exported $ZFS_ROOT_POOL_NAME successfully"
+    else
+        warning "Could not export $ZFS_ROOT_POOL_NAME - pools will auto-import on reboot"
+    fi
     
-    success "Cleanup completed"
+    success "Cleanup completed - system ready for reboot"
 }
 
 # Main function
 main() {
     info "Starting post-installation configuration..."
+    
+    # Verify ZFS is working
+    if ! command -v zpool >/dev/null 2>&1; then
+        error_exit "ZFS utilities not available. Please ensure ZFS is properly installed."
+    fi
+    
+    # Check if root pool exists
+    if ! zpool list "$ZFS_ROOT_POOL_NAME" >/dev/null 2>&1; then
+        error_exit "Root ZFS pool '$ZFS_ROOT_POOL_NAME' not found. Installation may have failed."
+    fi
+    
+    info "ZFS root pool '$ZFS_ROOT_POOL_NAME' found and accessible"
     
     # Mount root filesystem for configuration
     local root_fs="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
@@ -437,14 +464,38 @@ main() {
     
     mkdir -p "$mount_point"
     
-    # Try to mount the ZFS filesystem
-    if ! mountpoint -q "$mount_point"; then
+    # Check if already mounted from previous script
+    if mountpoint -q "$mount_point"; then
+        info "Mount point already mounted from previous script"
+    else
+        # Try to mount the ZFS filesystem
+        info "Mounting ZFS root filesystem for post-install configuration..."
+        
         # Set mountpoint and try to mount
-        zfs set mountpoint="$mount_point" "$root_fs" 2>/dev/null || true
+        if ! zfs set mountpoint="$mount_point" "$root_fs" 2>/dev/null; then
+            warning "Could not set ZFS mountpoint, trying alternative mount method"
+        fi
         
         if ! zfs mount "$root_fs" 2>/dev/null; then
-            mount -t zfs "$root_fs" "$mount_point" || error_exit "Failed to mount root filesystem for post-install"
+            info "Direct ZFS mount failed, trying manual mount..."
+            if ! mount -t zfs "$root_fs" "$mount_point" 2>/dev/null; then
+                # Try importing the pool first
+                info "Mount failed, attempting to import pool and retry..."
+                zpool import -f "$ZFS_ROOT_POOL_NAME" 2>/dev/null || true
+                sleep 2
+                
+                # Retry mount after import
+                if ! mount -t zfs "$root_fs" "$mount_point"; then
+                    error_exit "Failed to mount root filesystem for post-install: $root_fs"
+                fi
+            fi
         fi
+        success "Root filesystem mounted successfully"
+    fi
+    
+    # Verify the mount is working and contains a Proxmox installation
+    if [[ ! -d "$mount_point/usr" ]] || [[ ! -d "$mount_point/etc" ]]; then
+        error_exit "Mounted filesystem does not appear to contain a valid Proxmox installation"
     fi
     
     copy_rescue_ssh_keys_to_install

@@ -1248,7 +1248,7 @@ cleanup_chroot() {
         sleep 1
     fi
     
-    # Force unmount with retries
+    # Force unmount with retries - but don't fail the script if it doesn't work
     local max_retries=3
     local retry_count=0
     
@@ -1274,17 +1274,19 @@ cleanup_chroot() {
         done
     done
     
-    # Unmount main ZFS filesystem
+    # Unmount main ZFS filesystem - don't fail if this doesn't work since post-install will handle it
     retry_count=0
     while [[ $retry_count -lt $max_retries ]]; do
         if mountpoint -q "$mount_point" 2>/dev/null; then
             if umount "$mount_point" 2>/dev/null; then
+                info "Unmounted $mount_point successfully"
                 break
             else
                 ((retry_count++))
                 if [[ $retry_count -eq $max_retries ]]; then
-                    warning "Could not unmount $mount_point after $max_retries attempts, forcing..."
-                    umount -f -l "$mount_point" 2>/dev/null || true
+                    warning "Could not unmount $mount_point - post-install script will handle this"
+                    # Don't force unmount here, let post-install deal with it
+                    break
                 else
                     sleep 2
                 fi
@@ -1299,7 +1301,7 @@ cleanup_chroot() {
         umount /mnt/proxmox-iso || umount -f /mnt/proxmox-iso 2>/dev/null || true
     fi
     
-    success "Cleanup completed"
+    success "Cleanup completed (some mounts may remain for post-install)"
 }
 
 # Main function
