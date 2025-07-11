@@ -696,19 +696,35 @@ EOF
     if [[ -f /etc/zfs/zpool.cache ]]; then
         # Try to read drive info from cache without running zfs commands
         local cache_drives
-        cache_drives=$(strings /etc/zfs/zpool.cache 2>/dev/null | grep -E '^/dev/(sd[a-z]+|nvme[0-9]+n[0-9]+)$' | sort -u | tr '\n' ' ')
-        if [[ -n "$cache_drives" ]]; then
-            root_drives="$cache_drives"
-            info "Found drives from ZFS cache: $root_drives"
+        # Add timeout to prevent hanging on cache file operations
+        if cache_drives=$(timeout 10 bash -c "strings /etc/zfs/zpool.cache 2>/dev/null | grep -E '^/dev/(sd[a-z]+|nvme[0-9]+n[0-9]+)$' | sort -u | tr '\n' ' '" 2>/dev/null); then
+            if [[ -n "$cache_drives" ]]; then
+                root_drives="$cache_drives"
+                info "Found drives from ZFS cache: $root_drives"
+            else
+                info "ZFS cache file processed but no drives found"
+            fi
+        else
+            warning "ZFS cache processing timed out or failed, trying alternative methods"
         fi
+    else
+        info "No ZFS cache file found"
     fi
     
     if [[ -z "$root_drives" ]]; then
         # Method 2: Look for drives with /dev/ prefix using zpool status
         info "Trying zpool status method..."
         if run_zfs_command "zpool status '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_status.tmp 2>&1"; then
-            root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_status.tmp | awk '{print $1}' | tr '\n' ' ')
-            info "Found drives with /dev/ prefix: $root_drives"
+            if [[ -f /tmp/zpool_status.tmp ]]; then
+                root_drives=$(timeout 5 bash -c "grep -E '^\s+/dev/' /tmp/zpool_status.tmp | awk '{print \$1}' | tr '\n' ' '" 2>/dev/null || echo "")
+                if [[ -n "$root_drives" ]]; then
+                    info "Found drives with /dev/ prefix: $root_drives"
+                else
+                    info "zpool status completed but no /dev/ drives found"
+                fi
+            else
+                warning "zpool status did not create output file"
+            fi
         else
             warning "zpool status command failed or timed out"
         fi
@@ -718,8 +734,14 @@ EOF
         info "No /dev/ prefixed drives found, trying alternative methods..."
         # Method 3: Look for nvme/sd drives without /dev/ prefix and add it
         if [[ -f /tmp/zpool_status.tmp ]]; then
-            root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_status.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
-            info "Found drives without /dev/ prefix: $root_drives"
+            root_drives=$(timeout 5 bash -c "grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_status.tmp | awk '{print \"/dev/\" \$1}' | tr '\n' ' '" 2>/dev/null || echo "")
+            if [[ -n "$root_drives" ]]; then
+                info "Found drives without /dev/ prefix: $root_drives"
+            else
+                info "No nvme/sd drives found in zpool status output"
+            fi
+        else
+            info "No zpool status output file available for processing"
         fi
     fi
     
@@ -727,8 +749,18 @@ EOF
         info "Trying zpool list method..."
         # Method 4: Try zpool list -v
         if run_zfs_command "zpool list -v '$ZFS_ROOT_POOL_NAME' >/tmp/zpool_list.tmp 2>&1"; then
-            root_drives=$(grep -E '^\s+/dev/' /tmp/zpool_list.tmp | awk '{print $1}' | tr '\n' ' ')
-            info "Found drives using zpool list: $root_drives"
+            if [[ -f /tmp/zpool_list.tmp ]]; then
+                root_drives=$(timeout 5 bash -c "grep -E '^\s+/dev/' /tmp/zpool_list.tmp | awk '{print \$1}' | tr '\n' ' '" 2>/dev/null || echo "")
+                if [[ -n "$root_drives" ]]; then
+                    info "Found drives using zpool list: $root_drives"
+                else
+                    info "zpool list completed but no /dev/ drives found"
+                fi
+            else
+                warning "zpool list did not create output file"
+            fi
+        else
+            warning "zpool list command failed or timed out"
         fi
     fi
     
@@ -736,8 +768,14 @@ EOF
         info "Trying zpool list with device name detection..."
         # Method 5: Try zpool list -v with device name detection
         if [[ -f /tmp/zpool_list.tmp ]]; then
-            root_drives=$(grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_list.tmp | awk '{print "/dev/" $1}' | tr '\n' ' ')
-            info "Found drives using zpool list without /dev/: $root_drives"
+            root_drives=$(timeout 5 bash -c "grep -E '^\s+(nvme[0-9]+n[0-9]+|sd[a-z]+)' /tmp/zpool_list.tmp | awk '{print \"/dev/\" \$1}' | tr '\n' ' '" 2>/dev/null || echo "")
+            if [[ -n "$root_drives" ]]; then
+                info "Found drives using zpool list without /dev/: $root_drives"
+            else
+                info "No nvme/sd drives found in zpool list output"
+            fi
+        else
+            info "No zpool list output file available for processing"
         fi
     fi
     
@@ -747,9 +785,21 @@ EOF
         if [[ -f /etc/zfs/zpool.cache ]]; then
             info "Checking zpool cache..."
             if run_zfs_command "zdb -C '$ZFS_ROOT_POOL_NAME' >/tmp/zdb_output.tmp 2>&1"; then
-                root_drives=$(grep -oE '"/dev/[^"]+' /tmp/zdb_output.tmp | sed 's/"//g' | tr '\n' ' ')
-                info "Found drives from zpool cache: $root_drives"
+                if [[ -f /tmp/zdb_output.tmp ]]; then
+                    root_drives=$(timeout 5 bash -c "grep -oE '\"/dev/[^\"]+' /tmp/zdb_output.tmp | sed 's/\"//g' | tr '\n' ' '" 2>/dev/null || echo "")
+                    if [[ -n "$root_drives" ]]; then
+                        info "Found drives from zpool cache: $root_drives"
+                    else
+                        info "zdb completed but no drives found in cache"
+                    fi
+                else
+                    warning "zdb did not create output file"
+                fi
+            else
+                warning "zdb command failed or timed out"
             fi
+        else
+            info "No zpool cache file available for zdb analysis"
         fi
     fi
     
