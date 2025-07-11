@@ -354,6 +354,62 @@ verify_installation() {
     success "Installation verification completed"
 }
 
+# Copy SSH keys from rescue environment to installation
+copy_rescue_ssh_keys_to_install() {
+    info "Copying SSH keys from rescue environment to installation..."
+    
+    local mount_point="/mnt/proxmox"
+    
+    # Ensure SSH directory exists in the installation
+    mkdir -p "$mount_point/etc/ssh"
+    mkdir -p "$mount_point/root/.ssh"
+    
+    # Copy SSH host keys from rescue environment to installation
+    if [[ -d /etc/ssh ]]; then
+        info "Copying SSH host keys..."
+        
+        # Copy all SSH host keys
+        for key_file in /etc/ssh/ssh_host_*; do
+            if [[ -f "$key_file" ]]; then
+                cp "$key_file" "$mount_point/etc/ssh/" || warning "Failed to copy $key_file"
+            fi
+        done
+        
+        # Set proper permissions for private keys
+        chmod 600 "$mount_point"/etc/ssh/ssh_host_*_key 2>/dev/null || true
+        chmod 644 "$mount_point"/etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+        
+        success "SSH host keys copied"
+    else
+        warning "No SSH directory found in rescue environment"
+    fi
+    
+    # Copy authorized_keys if they exist
+    if [[ -f /root/.ssh/authorized_keys ]]; then
+        info "Copying authorized_keys..."
+        cp /root/.ssh/authorized_keys "$mount_point/root/.ssh/" || warning "Failed to copy authorized_keys"
+        
+        # Set proper permissions
+        chmod 700 "$mount_point/root/.ssh"
+        chmod 600 "$mount_point/root/.ssh/authorized_keys"
+        
+        success "Authorized keys copied"
+    else
+        warning "No authorized_keys found in rescue environment"
+    fi
+    
+    # Copy SSH client configuration if it exists
+    if [[ -f /etc/ssh/ssh_config ]]; then
+        cp /etc/ssh/ssh_config "$mount_point/etc/ssh/" || true
+    fi
+    
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        cp /etc/ssh/sshd_config "$mount_point/etc/ssh/" || true
+    fi
+    
+    success "SSH keys and configuration copied from rescue environment"
+}
+
 # Final cleanup
 final_cleanup() {
     info "Performing final cleanup..."

@@ -297,6 +297,27 @@ setup_chroot() {
     # Copy DNS configuration
     cp /etc/resolv.conf "$mount_point/etc/resolv.conf"
     
+    # Copy ZFS configuration to chroot environment
+    if [[ -f /etc/zfs/zpool.cache ]]; then
+        mkdir -p "$mount_point/etc/zfs"
+        cp /etc/zfs/zpool.cache "$mount_point/etc/zfs/" || true
+        info "ZFS cache copied to chroot"
+    fi
+    
+    # Copy modprobe configuration for ZFS if it exists
+    if [[ -f /etc/modprobe.d/zfs.conf ]]; then
+        mkdir -p "$mount_point/etc/modprobe.d"
+        cp /etc/modprobe.d/zfs.conf "$mount_point/etc/modprobe.d/" || true
+    fi
+    
+    # Ensure ZFS modules directory exists in chroot
+    local kernel_version
+    kernel_version=$(chroot "$mount_point" uname -r 2>/dev/null || echo "unknown")
+    if [[ "$kernel_version" != "unknown" ]]; then
+        mkdir -p "$mount_point/lib/modules/$kernel_version/kernel/fs/zfs"
+        info "ZFS module directory prepared for kernel $kernel_version"
+    fi
+    
     success "Chroot environment configured"
 }
 
@@ -340,25 +361,56 @@ apt-get install -y \
     chrony
 
 # Try to install ZFS utilities from packages first
-if ! apt-get install -y zfsutils-linux 2>/dev/null; then
-    echo "Warning: Could not install zfsutils-linux package"
+echo "Installing ZFS utilities..."
+zfs_package_success=false
+
+if apt-get install -y zfsutils-linux 2>/dev/null; then
+    echo "✓ ZFS utilities installed from packages"
+    zfs_package_success=true
     
-    # Use rescue system ZFS if package installation fails
-    if [[ -f /tmp/install-rescue-zfs.sh ]]; then
-        echo "Installing ZFS from rescue system..."
-        /tmp/install-rescue-zfs.sh
+    # Test if ZFS is functional
+    echo "Testing ZFS functionality..."
+    if timeout 10 zfs version >/dev/null 2>&1; then
+        echo "✓ ZFS package installation successful and functional"
     else
-        echo "Error: No ZFS installation method available"
-        exit 1
+        echo "⚠ Warning: ZFS package installed but not functional, trying rescue system..."
+        zfs_package_success=false
     fi
 else
-    echo "ZFS utilities installed from packages"
+    echo "⚠ Warning: Could not install zfsutils-linux package"
+fi
+
+# Use rescue system ZFS if package installation failed or is not functional
+if [[ "$zfs_package_success" != "true" ]]; then
+    echo "Attempting to install ZFS from rescue system..."
     
-    # Check for symbol compatibility issues
-    if ! /sbin/mount.zfs --help >/dev/null 2>&1; then
-        echo "Warning: Package ZFS has compatibility issues, using rescue system ZFS"
-        if [[ -f /tmp/install-rescue-zfs.sh ]]; then
-            /tmp/install-rescue-zfs.sh
+    if [[ -f /tmp/install-rescue-zfs.sh ]]; then
+        echo "Installing ZFS from rescue system..."
+        if /tmp/install-rescue-zfs.sh; then
+            echo "✓ Rescue system ZFS installed successfully"
+        else
+            echo "⚠ Warning: Rescue system ZFS installation failed"
+            # Try to continue anyway
+        fi
+    else
+        echo "⚠ Warning: No rescue system ZFS available"
+        
+        # Last resort: try to copy ZFS binaries from host if available
+        if command -v zfs >/dev/null 2>&1; then
+            echo "Copying ZFS binaries from host system..."
+            mkdir -p /sbin /usr/sbin
+            
+            # Copy essential ZFS binaries
+            for binary in zfs zpool zdb mount.zfs; do
+                if command -v "$binary" >/dev/null 2>&1; then
+                    cp "$(command -v "$binary")" "/sbin/" 2>/dev/null || \
+                    cp "$(command -v "$binary")" "/usr/sbin/" 2>/dev/null || true
+                fi
+            done
+            
+            echo "ZFS binaries copied from host system"
+        else
+            echo "⚠ Warning: No ZFS installation method available, system may not boot properly"
         fi
     fi
 fi
@@ -576,12 +628,29 @@ configure_bootloader() {
     
     # Configure GRUB for ZFS
     info "Configuring GRUB for ZFS..."
+    
+    # Ensure we have the correct ZFS root dataset path
+    local zfs_root_dataset="$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+    
+    # Backup original GRUB config if it exists
+    if [[ -f "$mount_point/etc/default/grub" ]]; then
+        cp "$mount_point/etc/default/grub" "$mount_point/etc/default/grub.backup"
+    fi
+    
     cat >> "$mount_point/etc/default/grub" << EOF
 
 # ZFS Configuration
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1"
+GRUB_CMDLINE_LINUX="root=ZFS=$zfs_root_dataset boot=zfs"
+GRUB_DISABLE_OS_PROBER=true
+GRUB_DISABLE_RECOVERY=false
+GRUB_TIMEOUT=5
 EOF
+    
+    # Also create a GRUB environment block to help with ZFS detection
+    chroot "$mount_point" bash -c "grub-editenv /boot/grub/grubenv create 2>/dev/null || true"
+    chroot "$mount_point" bash -c "grub-editenv /boot/grub/grubenv set zfs_root=$zfs_root_dataset 2>/dev/null || true"
+    
     success "GRUB ZFS configuration added"
     
     # Create a script to configure GRUB with proper ZFS setup
@@ -615,22 +684,106 @@ run_with_timeout() {
     fi
 }
 
-# Make sure ZFS modules are loaded
-echo "Loading ZFS modules..."
-if ! modprobe zfs 2>/dev/null; then
-    echo "Warning: Could not load ZFS module, trying to continue..."
-fi
-
-# Import the pool if not already imported
-echo "Checking ZFS pool status..."
-if ! zpool list "$1" >/dev/null 2>&1; then
-    echo "Importing ZFS pool $1..."
-    if ! timeout 30 zpool import -f "$1" 2>/dev/null; then
-        echo "Warning: Pool import failed or timed out, continuing..."
+# Check if we can use rescue system ZFS
+use_rescue_zfs() {
+    echo "Checking for rescue system ZFS availability..."
+    
+    # Check if rescue ZFS binaries are available
+    if [[ -d /tmp/zfs-rescue ]] && [[ -f /tmp/zfs-rescue/install-rescue-zfs.sh ]]; then
+        echo "Installing rescue system ZFS..."
+        if /tmp/zfs-rescue/install-rescue-zfs.sh; then
+            echo "✓ Rescue system ZFS installed successfully"
+            return 0
+        else
+            echo "⚠ Rescue system ZFS installation failed"
+        fi
     fi
-else
-    echo "✓ Pool $1 is already imported"
-fi
+    
+    return 1
+}
+
+# Fix ZFS module and pool import issues
+fix_zfs_environment() {
+    echo "Setting up ZFS environment..."
+    
+    # First, try to load ZFS module
+    local zfs_loaded=false
+    
+    # Method 1: Try normal module loading
+    if modprobe zfs 2>/dev/null; then
+        echo "✓ ZFS module loaded successfully"
+        zfs_loaded=true
+    else
+        echo "Warning: Could not load ZFS module from kernel, trying rescue system..."
+        
+        # Method 2: Try rescue system ZFS if available
+        if use_rescue_zfs; then
+            zfs_loaded=true
+        else
+            echo "⚠ Warning: ZFS module could not be loaded, GRUB may have issues"
+        fi
+    fi
+    
+    # Clean up any existing ZFS locks/processes that might interfere
+    echo "Cleaning up ZFS environment..."
+    pkill -9 zfs 2>/dev/null || true
+    pkill -9 zpool 2>/dev/null || true
+    rm -f /var/lock/zfs/* 2>/dev/null || true
+    
+    # Wait for cleanup
+    sleep 2
+    
+    return 0
+}
+
+# Import pool with better error handling
+import_zfs_pool() {
+    local pool_name="$1"
+    
+    echo "Importing ZFS pool: $pool_name"
+    
+    # Check if pool is already imported
+    if timeout 10 zpool list "$pool_name" >/dev/null 2>&1; then
+        echo "✓ Pool $pool_name is already imported"
+        return 0
+    fi
+    
+    # Try to import the pool
+    echo "Pool not found, attempting import..."
+    
+    # Method 1: Simple import
+    if timeout 30 zpool import -f "$pool_name" 2>/dev/null; then
+        echo "✓ Pool imported successfully"
+        return 0
+    fi
+    
+    # Method 2: Import by looking for pools
+    echo "Simple import failed, scanning for pools..."
+    local available_pools
+    if available_pools=$(timeout 30 zpool import 2>/dev/null | grep "pool:" | awk '{print $2}' | head -5); then
+        if echo "$available_pools" | grep -q "^$pool_name$"; then
+            echo "Found pool in scan, importing..."
+            if timeout 30 zpool import -f "$pool_name" 2>/dev/null; then
+                echo "✓ Pool imported after scan"
+                return 0
+            fi
+        fi
+    fi
+    
+    # Method 3: Import with directory scan (last resort)
+    echo "Standard import failed, trying directory scan..."
+    if timeout 30 zpool import -d /dev -f "$pool_name" 2>/dev/null; then
+        echo "✓ Pool imported with directory scan"
+        return 0
+    fi
+    
+    echo "⚠ Warning: Could not import pool $pool_name, continuing without import"
+    return 1
+}
+
+# Setup ZFS environment before GRUB operations
+fix_zfs_environment
+import_zfs_pool "$1"
 
 # Update initramfs to include ZFS
 echo "Updating initramfs (this may take a few minutes)..."
@@ -646,18 +799,56 @@ else
     fi
 fi
 
-# Update GRUB configuration  
+# Update GRUB configuration with better ZFS handling
 echo "Updating GRUB configuration..."
+
+# Create a temporary GRUB configuration that bypasses problematic ZFS probing
+echo "Creating fallback GRUB configuration..."
+cat > /etc/default/grub.tmp << 'GRUB_EOF'
+# GRUB configuration for ZFS - Proxmox installation
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_DISTRIBUTOR="Proxmox VE"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet"
+GRUB_CMDLINE_LINUX="root=ZFS=$1/ROOT/pve-1 boot=zfs"
+GRUB_DISABLE_OS_PROBER=true
+GRUB_DISABLE_RECOVERY=true
+GRUB_EOF
+
+# Backup original and use our version
+if [[ -f /etc/default/grub ]]; then
+    cp /etc/default/grub /etc/default/grub.backup
+fi
+cp /etc/default/grub.tmp /etc/default/grub
+
+# Try to update GRUB configuration with fallback methods
 if run_with_timeout "update-grub 2>&1"; then
     echo "✓ GRUB configuration updated"
+elif run_with_timeout "grub-mkconfig -o /boot/grub/grub.cfg 2>&1"; then
+    echo "✓ GRUB configuration created manually"
 else
-    echo "⚠ Warning: GRUB configuration update failed or timed out, trying manual method..."
-    # Try manual grub config generation
-    if run_with_timeout "grub-mkconfig -o /boot/grub/grub.cfg 2>&1"; then
-        echo "✓ GRUB configuration created manually"
-    else
-        echo "⚠ Warning: All GRUB configuration attempts failed"
-    fi
+    echo "⚠ Warning: GRUB configuration failed, creating minimal config..."
+    
+    # Create a minimal working GRUB configuration as last resort
+    mkdir -p /boot/grub
+    cat > /boot/grub/grub.cfg << 'MINIMAL_GRUB_EOF'
+set timeout=5
+set default=0
+
+menuentry "Proxmox VE" {
+    linux /boot/vmlinuz root=ZFS=$1/ROOT/pve-1 boot=zfs quiet
+    initrd /boot/initrd.img
+}
+
+menuentry "Proxmox VE (Recovery)" {
+    linux /boot/vmlinuz root=ZFS=$1/ROOT/pve-1 boot=zfs single
+    initrd /boot/initrd.img
+}
+MINIMAL_GRUB_EOF
+    
+    # Replace the pool name in the minimal config
+    sed -i "s/\$1/$1/g" /boot/grub/grub.cfg
+    echo "✓ Minimal GRUB configuration created"
 fi
 
 # Install GRUB to boot devices
@@ -937,17 +1128,58 @@ EOF
         
         # Manual GRUB installation as fallback
         info "Performing manual GRUB configuration..."
-        chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive modprobe zfs || true"
-        chroot "$mount_point" bash -c "timeout 30 zpool import -f '$ZFS_ROOT_POOL_NAME' || true"
+        
+        # Ensure chroot environment is still set up
+        mount --bind /dev "$mount_point/dev" 2>/dev/null || true
+        mount --bind /proc "$mount_point/proc" 2>/dev/null || true
+        mount --bind /sys "$mount_point/sys" 2>/dev/null || true
+        
+        # Set up ZFS environment in chroot
+        chroot "$mount_point" bash -c "export DEBIAN_FRONTEND=noninteractive; modprobe zfs 2>/dev/null || echo 'ZFS module load failed'"
+        
+        # Try to import pool with better error handling
+        chroot "$mount_point" bash -c "timeout 30 zpool import -f '$ZFS_ROOT_POOL_NAME' 2>/dev/null || echo 'Pool import failed or timed out'"
+        
+        # Verify ZFS dataset exists and is accessible
+        if chroot "$mount_point" bash -c "timeout 10 zfs list '$ZFS_ROOT_POOL_NAME/ROOT/pve-1' >/dev/null 2>&1"; then
+            info "ZFS dataset verified successfully"
+        else
+            warning "ZFS dataset verification failed, but continuing with GRUB installation"
+        fi
         
         info "Updating initramfs manually..."
         if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive update-initramfs -u -k all"; then
-            warning "Initramfs update timed out or failed"
+            warning "Initramfs update timed out or failed, trying single kernel update"
+            if ! timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive update-initramfs -u"; then
+                warning "All initramfs update attempts failed"
+            fi
         fi
         
         info "Updating GRUB configuration manually..."
+        
+        # Create a working GRUB config manually if update-grub fails
         if ! timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive update-grub"; then
-            warning "GRUB configuration update timed out or failed"
+            warning "GRUB configuration update failed, creating manual config"
+            
+            # Create minimal GRUB configuration
+            chroot "$mount_point" bash -c "
+            mkdir -p /boot/grub
+            cat > /boot/grub/grub.cfg << 'GRUB_EOF'
+set timeout=5
+set default=0
+
+menuentry \"Proxmox VE\" {
+    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs quiet
+    initrd /boot/initrd.img
+}
+
+menuentry \"Proxmox VE (Recovery)\" {
+    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs single
+    initrd /boot/initrd.img
+}
+GRUB_EOF
+            "
+            success "Manual GRUB configuration created"
         fi
         
         # Install GRUB to each drive individually
@@ -1005,15 +1237,67 @@ cleanup_chroot() {
     
     info "Cleaning up chroot environment..."
     
-    # Unmount filesystems
-    umount "$mount_point/dev/pts" || true
-    umount "$mount_point/dev" || true
-    umount "$mount_point/proc" || true
-    umount "$mount_point/sys" || true
-    umount "$mount_point" || true
+    # Kill any processes that might be keeping mounts busy
+    local chroot_pids
+    chroot_pids=$(lsof +D "$mount_point" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || echo "")
+    if [[ -n "$chroot_pids" ]]; then
+        warning "Found processes using chroot directory, terminating..."
+        echo "$chroot_pids" | xargs -r kill -TERM 2>/dev/null || true
+        sleep 2
+        echo "$chroot_pids" | xargs -r kill -KILL 2>/dev/null || true
+        sleep 1
+    fi
+    
+    # Force unmount with retries
+    local max_retries=3
+    local retry_count=0
+    
+    # Unmount in reverse order with retries
+    for mount_path in "$mount_point/dev/pts" "$mount_point/dev" "$mount_point/proc" "$mount_point/sys"; do
+        retry_count=0
+        while [[ $retry_count -lt $max_retries ]]; do
+            if mountpoint -q "$mount_path" 2>/dev/null; then
+                if umount "$mount_path" 2>/dev/null; then
+                    break
+                else
+                    ((retry_count++))
+                    if [[ $retry_count -eq $max_retries ]]; then
+                        warning "Could not unmount $mount_path after $max_retries attempts, forcing..."
+                        umount -f -l "$mount_path" 2>/dev/null || true
+                    else
+                        sleep 1
+                    fi
+                fi
+            else
+                break
+            fi
+        done
+    done
+    
+    # Unmount main ZFS filesystem
+    retry_count=0
+    while [[ $retry_count -lt $max_retries ]]; do
+        if mountpoint -q "$mount_point" 2>/dev/null; then
+            if umount "$mount_point" 2>/dev/null; then
+                break
+            else
+                ((retry_count++))
+                if [[ $retry_count -eq $max_retries ]]; then
+                    warning "Could not unmount $mount_point after $max_retries attempts, forcing..."
+                    umount -f -l "$mount_point" 2>/dev/null || true
+                else
+                    sleep 2
+                fi
+            fi
+        else
+            break
+        fi
+    done
     
     # Unmount ISO
-    umount /mnt/proxmox-iso || true
+    if mountpoint -q /mnt/proxmox-iso 2>/dev/null; then
+        umount /mnt/proxmox-iso || umount -f /mnt/proxmox-iso 2>/dev/null || true
+    fi
     
     success "Cleanup completed"
 }
@@ -1029,23 +1313,57 @@ main() {
     
     info "Starting Proxmox installation..."
     
-    check_root_pool
+    # Verify prerequisites
+    if ! command -v debootstrap >/dev/null 2>&1; then
+        error_exit "debootstrap is not installed. Please run 01-prepare-system.sh first."
+    fi
+    
+    # Setup error handling for critical failures
+    local installation_failed=false
+    
+    # Execute installation steps with error handling
+    if ! check_root_pool; then
+        error_exit "Root pool check failed. Please run 02-setup-zfs.sh first."
+    fi
+    
     download_proxmox_iso
     mount_proxmox_iso
     install_base_system
     setup_chroot
-    install_proxmox_packages
+    
+    if ! install_proxmox_packages; then
+        warning "Proxmox package installation had issues, but continuing..."
+        installation_failed=true
+    fi
+    
     configure_system
     configure_network
-    configure_bootloader
+    
+    if ! configure_bootloader; then
+        warning "Bootloader configuration had issues, system may not boot properly"
+        installation_failed=true
+    fi
+    
     configure_ssh
     cleanup_chroot
     
-    success "Proxmox installation completed!"
-    echo
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  PROXMOX INSTALLATION COMPLETED!     ${NC}"
-    echo -e "${GREEN}========================================${NC}"
+    if [[ "$installation_failed" == "true" ]]; then
+        warning "Installation completed with some issues. Please check the log for details."
+        echo
+        echo -e "${YELLOW}========================================${NC}"
+        echo -e "${YELLOW}  INSTALLATION COMPLETED WITH ISSUES  ${NC}"
+        echo -e "${YELLOW}========================================${NC}"
+        echo
+        echo -e "${RED}Some components may not function correctly.${NC}"
+        echo -e "${BLUE}Please review the installation log before proceeding.${NC}"
+    else
+        success "Proxmox installation completed!"
+        echo
+        echo -e "${GREEN}========================================${NC}"
+        echo -e "${GREEN}  PROXMOX INSTALLATION COMPLETED!     ${NC}"
+        echo -e "${GREEN}========================================${NC}"
+    fi
+    
     echo
     echo -e "${BLUE}Next steps:${NC}"
     echo -e "${BLUE}1.${NC} Run the post-installation script:"
