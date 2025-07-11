@@ -36,8 +36,19 @@ info() {
     log "INFO: $1"
 }
 
+warning() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+    log "WARNING: $1"
+}
+
 # Update package manager
 update_system() {
+    # Skip update if rescue ZFS setup was already run (which updates packages)
+    if [[ -f /tmp/rescue-zfs-completed ]]; then
+        info "Package manager already updated by rescue ZFS setup"
+        return 0
+    fi
+    
     info "Updating package manager..."
     apt-get update || error_exit "Failed to update package manager"
     success "Package manager updated"
@@ -47,7 +58,14 @@ update_system() {
 install_packages() {
     info "Installing required packages..."
     
-    # First install basic packages
+    # Skip package installation if rescue ZFS setup was already run (which installs packages)
+    if [[ -f /tmp/rescue-zfs-completed ]]; then
+        info "Required packages already installed by rescue ZFS setup"
+        success "All required packages installed"
+        return 0
+    fi
+    
+    # Install all basic packages at once for efficiency
     local basic_packages=(
         "debootstrap"
         "gdisk"
@@ -61,157 +79,37 @@ install_packages() {
         "nvme-cli"
     )
     
+    # Check which packages need to be installed
+    local packages_to_install=()
     for package in "${basic_packages[@]}"; do
         if ! dpkg -l | grep -q "^ii  $package "; then
-            info "Installing $package..."
-            apt-get install -y "$package" || error_exit "Failed to install $package"
-        else
-            info "$package already installed"
+            packages_to_install+=("$package")
         fi
     done
     
-    # Handle ZFS installation separately due to potential kernel compatibility issues
-    if [[ "${USE_RESCUE_ZFS:-no}" == "yes" ]]; then
-        info "Skipping ZFS package installation (using rescue system ZFS)"
+    # Install all missing packages at once
+    if [[ ${#packages_to_install[@]} -gt 0 ]]; then
+        info "Installing packages: ${packages_to_install[*]}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages_to_install[@]}" || error_exit "Failed to install packages"
     else
-        install_zfs_packages
+        info "All basic packages already installed"
     fi
+    
+    # Always use rescue system ZFS - never install ZFS packages
+    info "Using rescue system ZFS (never installing ZFS packages)"
     
     success "All required packages installed"
 }
 
-# Install ZFS packages with kernel compatibility handling
-install_zfs_packages() {
-    info "Installing ZFS packages..."
-    
-    # Check current kernel version
-    local kernel_version
-    kernel_version=$(uname -r | cut -d'-' -f1)
-    local major_version
-    major_version=$(echo "$kernel_version" | cut -d'.' -f1)
-    local minor_version
-    minor_version=$(echo "$kernel_version" | cut -d'.' -f2)
-    
-    info "Current kernel: $kernel_version"
-    
-    # Check if kernel is too new for Debian 12 ZFS
-    if [[ $major_version -gt 6 ]] || [[ $major_version -eq 6 && $minor_version -gt 2 ]]; then
-        warning "Kernel $kernel_version may be too new for Debian 12 ZFS packages"
-        info "Attempting alternative ZFS installation methods..."
-        
-        # Try installing from backports first
-        if install_zfs_backports; then
-            return 0
-        fi
-        
-        # If backports fail, try manual installation
-        if install_zfs_manual; then
-            return 0
-        fi
-        
-        error_exit "Could not install ZFS packages compatible with kernel $kernel_version"
-    else
-        # Standard installation for compatible kernels
-        install_zfs_standard
-    fi
-}
-
-# Install ZFS from standard Debian repositories
-install_zfs_standard() {
-    info "Installing ZFS from standard repositories..."
-    
-    # Remove any broken ZFS packages first
-    apt-get remove --purge -y zfs-dkms zfs-zed 2>/dev/null || true
-    
-    # Clean package cache
-    apt-get clean
-    apt-get update
-    
-    # Install ZFS packages
-    DEBIAN_FRONTEND=noninteractive apt-get install -y zfsutils-linux || error_exit "Failed to install ZFS packages"
-    
-    success "ZFS installed from standard repositories"
-}
-
-# Try installing ZFS from backports
-install_zfs_backports() {
-    info "Attempting ZFS installation from backports..."
-    
-    # Add backports repository
-    echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list
-    apt-get update
-    
-    # Try installing from backports
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y -t bookworm-backports zfsutils-linux 2>/dev/null; then
-        success "ZFS installed from backports"
-        return 0
-    else
-        warning "ZFS installation from backports failed"
-        rm -f /etc/apt/sources.list.d/backports.list
-        apt-get update
-        return 1
-    fi
-}
-
-# Manual ZFS installation for newer kernels
-install_zfs_manual() {
-    info "Attempting manual ZFS installation..."
-    
-    # Remove any existing ZFS packages
-    apt-get remove --purge -y zfs-dkms zfs-zed zfsutils-linux 2>/dev/null || true
-    
-    # Download and install newer ZFS packages
-    local zfs_version="2.2.2"
-    local temp_dir="/tmp/zfs-install"
-    mkdir -p "$temp_dir"
-    cd "$temp_dir"
-    
-    # Try downloading from OpenZFS releases
-    if wget "https://github.com/openzfs/zfs/releases/download/zfs-${zfs_version}/zfs-${zfs_version}.tar.gz" 2>/dev/null; then
-        info "Downloaded ZFS source, attempting compilation..."
-        
-        # Install build dependencies
-        apt-get install -y build-essential autoconf automake libtool gawk alien fakeroot dkms libblkid-dev uuid-dev libudev-dev libssl-dev zlib1g-dev libaio-dev libattr1-dev libelf-dev linux-headers-$(uname -r) python3 python3-dev python3-setuptools python3-cffi libffi-dev python3-packaging git libcurl4-openssl-dev debhelper-compat
-        
-        # Extract and build
-        tar -xzf "zfs-${zfs_version}.tar.gz"
-        cd "zfs-${zfs_version}"
-        
-        ./configure --enable-systemd
-        make -j$(nproc) deb-utils deb-kmod
-        
-        # Install the built packages
-        dpkg -i *.deb
-        
-        success "ZFS compiled and installed from source"
-        return 0
-    else
-        warning "Could not download ZFS source"
-        return 1
-    fi
-}
-
-# Fallback: Use ZFS from live environment
-use_rescue_zfs() {
-    info "Using ZFS from rescue environment..."
-    
-    # The rescue system likely already has ZFS loaded
-    if lsmod | grep -q zfs; then
-        info "ZFS module already loaded in rescue system"
-        
-        # Install minimal userspace tools
-        apt-get install -y --no-install-recommends zfs-initramfs
-        
-        success "Using rescue system ZFS"
-        return 0
-    else
-        return 1
-    fi
-}
-
 # Load ZFS module
 load_zfs_module() {
-    info "Loading ZFS module..."
+    # Always use rescue ZFS - skip module loading if already completed
+    if [[ -f /tmp/rescue-zfs-completed ]]; then
+        info "ZFS already available from rescue system setup"
+        return 0
+    fi
+    
+    info "Loading ZFS module from rescue system..."
     
     # Check if ZFS module is already loaded
     if lsmod | grep -q zfs; then
@@ -246,24 +144,29 @@ load_zfs_module() {
         return 0
     fi
     
-    error_exit "Failed to load ZFS module. The kernel may be incompatible with available ZFS packages."
+    error_exit "Failed to load ZFS module. The rescue system ZFS may not be properly configured."
 }
 
 # Detect and display system information
 detect_system_info() {
     info "Detecting system information..."
     
+    # Only show detailed info if not already shown by rescue ZFS setup
+    if [[ -f /tmp/rescue-zfs-completed ]]; then
+        info "System information already displayed by rescue ZFS setup"
+        return 0
+    fi
+    
     echo "=== System Information ==="
     echo "Hostname: $(hostname)"
     echo "Kernel: $(uname -r)"
     echo "Architecture: $(uname -m)"
     echo "Memory: $(free -h | grep 'Mem:' | awk '{print $2}')"
-    echo "CPU: $(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)"
     echo "CPU Cores: $(nproc)"
     echo
     
     echo "=== Network Configuration ==="
-    ip addr show | grep -E '^[0-9]+:|inet ' | grep -v '127.0.0.1'
+    ip route get 1.1.1.1 | grep src | awk '{print "Primary IP: " $7}'
     echo
     
     echo "=== Storage Devices ==="
@@ -317,7 +220,16 @@ check_drives() {
     
     echo "=== Available Drives ==="
     for drive in "${drives[@]}"; do
-        if [[ " ${EXCLUDE_DRIVES[*]} " =~ " ${drive} " ]]; then
+        # Check if drive is excluded
+        local excluded=false
+        for excluded_drive in "${EXCLUDE_DRIVES[@]}"; do
+            if [[ "$drive" == "$excluded_drive" ]]; then
+                excluded=true
+                break
+            fi
+        done
+        
+        if [[ "$excluded" == "true" ]]; then
             echo "❌ $drive (excluded in configuration)"
             continue
         fi

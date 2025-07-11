@@ -99,22 +99,12 @@ check_kernel_compatibility() {
     
     local kernel_version
     kernel_version=$(uname -r | cut -d'-' -f1)
-    local major_version
-    major_version=$(echo "$kernel_version" | cut -d'.' -f1)
-    local minor_version
-    minor_version=$(echo "$kernel_version" | cut -d'.' -f2)
     
     info "Detected kernel: $kernel_version"
     
-    # Check if kernel is too new for standard Debian ZFS packages
-    if [[ $major_version -gt 6 ]] || [[ $major_version -eq 6 && $minor_version -gt 5 ]]; then
-        warning "Kernel $kernel_version may be incompatible with Debian ZFS packages"
-        warning "Will use rescue system ZFS instead"
-        export USE_RESCUE_ZFS="yes"
-    else
-        info "Kernel appears compatible with standard ZFS packages"
-        export USE_RESCUE_ZFS="no"
-    fi
+    # Always use rescue system ZFS for maximum compatibility
+    warning "Always using rescue system ZFS for maximum compatibility"
+    export USE_RESCUE_ZFS="yes"
 }
 
 # Main installation process
@@ -147,10 +137,9 @@ main() {
     fi
     
     # Execute installation steps
-    if [[ "${USE_RESCUE_ZFS:-no}" == "yes" ]]; then
-        info "Step 0: Setting up rescue system ZFS..."
-        bash "${SCRIPT_DIR}/scripts/00-rescue-zfs.sh"
-    fi
+    # Always run rescue ZFS setup first
+    info "Step 0: Setting up rescue system ZFS..."
+    bash "${SCRIPT_DIR}/scripts/00-rescue-zfs.sh"
     
     info "Step 1: Preparing system..."
     if ! bash "${SCRIPT_DIR}/scripts/01-prepare-system.sh"; then

@@ -245,6 +245,10 @@ main() {
     fi
     
     success "Alternative ZFS setup completed!"
+    
+    # Create marker file to indicate rescue ZFS setup is complete
+    touch /tmp/rescue-zfs-completed
+    
     echo
     echo "You can now continue with the main installation."
     echo "ZFS will be available from the rescue system."
