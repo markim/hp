@@ -687,7 +687,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Function to run commands with timeout and better error reporting
 run_with_timeout() {
-    local timeout_duration=90
+    local timeout_duration=60
     local cmd="$1"
     echo "Running: $cmd"
     
@@ -833,53 +833,67 @@ fi
 # Update GRUB configuration with better ZFS handling
 echo "Updating GRUB configuration..."
 
-# Create a temporary GRUB configuration that bypasses problematic ZFS probing
-echo "Creating fallback GRUB configuration..."
-cat > /etc/default/grub.tmp << 'GRUB_EOF'
+# Create a working GRUB configuration that bypasses filesystem detection issues
+echo "Creating GRUB configuration..."
+cat > /etc/default/grub << 'GRUB_EOF'
 # GRUB configuration for ZFS - Proxmox installation
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=5
 GRUB_DISTRIBUTOR="Proxmox VE"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs"
+GRUB_CMDLINE_LINUX="root=ZFS=$1/ROOT/pve-1 boot=zfs"
 GRUB_DISABLE_OS_PROBER=true
-GRUB_DISABLE_RECOVERY=true
+GRUB_DISABLE_RECOVERY=false
 GRUB_EOF
 
-# Backup original and use our version
-if [[ -f /etc/default/grub ]]; then
-    cp /etc/default/grub /etc/default/grub.backup
-fi
-cp /etc/default/grub.tmp /etc/default/grub
+# Get kernel version for manual GRUB config
+KERNEL_VERSION=""
+for kernel_file in /boot/vmlinuz-*; do
+    if [[ -f "$kernel_file" ]]; then
+        KERNEL_VERSION=$(basename "$kernel_file" | sed 's/vmlinuz-//')
+        echo "Found kernel: $KERNEL_VERSION"
+        break
+    fi
+done
 
-# Try to update GRUB configuration with fallback methods
-if run_with_timeout "update-grub 2>&1"; then
-    echo "✓ GRUB configuration updated"
-elif run_with_timeout "grub-mkconfig -o /boot/grub/grub.cfg 2>&1"; then
-    echo "✓ GRUB configuration created manually"
-else
-    echo "⚠ Warning: GRUB configuration failed, creating minimal config..."
-    
-    # Create a minimal working GRUB configuration as last resort
-    mkdir -p /boot/grub
-    cat > /boot/grub/grub.cfg << 'MINIMAL_GRUB_EOF'
+if [[ -z "$KERNEL_VERSION" ]]; then
+    echo "⚠ Warning: No kernel found, detecting from package manager..."
+    # Try to get kernel version from dpkg
+    KERNEL_VERSION=$(dpkg -l | grep linux-image | head -1 | awk '{print $2}' | sed 's/linux-image-//' || echo "")
+    if [[ -n "$KERNEL_VERSION" ]]; then
+        echo "Found kernel from packages: $KERNEL_VERSION"
+    else
+        echo "⚠ Warning: Could not detect kernel version, using fallback"
+        KERNEL_VERSION="6.8.12-11-pve"  # Fallback to known Proxmox kernel
+    fi
+fi
+
+# Create minimal GRUB configuration manually to avoid filesystem detection issues
+mkdir -p /boot/grub
+cat > /boot/grub/grub.cfg << MANUAL_GRUB_EOF
 set timeout=5
 set default=0
 
 menuentry "Proxmox VE" {
-    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs quiet
-    initrd /boot/initrd.img
+    linux /boot/vmlinuz-$KERNEL_VERSION root=ZFS=$1/ROOT/pve-1 boot=zfs quiet
+    initrd /boot/initrd.img-$KERNEL_VERSION
 }
 
 menuentry "Proxmox VE (Recovery)" {
-    linux /boot/vmlinuz root=ZFS=$ZFS_ROOT_POOL_NAME/ROOT/pve-1 boot=zfs single
-    initrd /boot/initrd.img
+    linux /boot/vmlinuz-$KERNEL_VERSION root=ZFS=$1/ROOT/pve-1 boot=zfs single
+    initrd /boot/initrd.img-$KERNEL_VERSION
 }
-MINIMAL_GRUB_EOF
-    
-    # Replace the pool name in the minimal config
-    sed -i "s/\$1/$1/g" /boot/grub/grub.cfg
-    echo "✓ Minimal GRUB configuration created"
+MANUAL_GRUB_EOF
+
+echo "✓ GRUB configuration created manually with kernel: $KERNEL_VERSION"
+
+# Try to update GRUB configuration (but don't fail if it doesn't work since we have manual config)
+if run_with_timeout "update-grub 2>&1"; then
+    echo "✓ GRUB configuration updated via update-grub"
+elif run_with_timeout "grub-mkconfig -o /boot/grub/grub.cfg 2>&1"; then
+    echo "✓ GRUB configuration created via grub-mkconfig"
+else
+    echo "⚠ Warning: Standard GRUB update failed, using manual configuration"
 fi
 
 # Install GRUB to boot devices
@@ -916,8 +930,27 @@ else
         drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
         if [[ -n "$drive" && -b "$drive" ]]; then
             echo "Installing GRUB to $drive..."
-            if run_with_timeout "grub-install --target=$grub_target --force $drive 2>&1"; then
-                echo "✓ GRUB installed successfully to $drive"
+            
+            # Method 1: Try with --skip-fs-probe to avoid filesystem detection issues
+            if run_with_timeout "grub-install --target=$grub_target --boot-directory=/boot --force --skip-fs-probe $drive 2>&1"; then
+                echo "✓ GRUB installed successfully to $drive (skip-fs-probe)"
+                ((installed_drives++))
+            # Method 2: Try with --allow-floppy for compatibility
+            elif run_with_timeout "grub-install --target=$grub_target --boot-directory=/boot --force --allow-floppy $drive 2>&1"; then
+                echo "✓ GRUB installed successfully to $drive (allow-floppy)"
+                ((installed_drives++))
+            # Method 3: Try with --no-floppy
+            elif run_with_timeout "grub-install --target=$grub_target --boot-directory=/boot --force --no-floppy $drive 2>&1"; then
+                echo "✓ GRUB installed successfully to $drive (no-floppy)"
+                ((installed_drives++))
+            # Method 4: Last resort - basic install without probing
+            elif timeout 30 grub-install --target=$grub_target --force --skip-fs-probe --no-floppy $drive 2>/dev/null; then
+                echo "✓ GRUB installed successfully to $drive (basic)"
+                ((installed_drives++))
+            else
+                echo "⚠ Warning: Failed to install GRUB to $drive"
+                ((failed_drives++))
+            fi
                 ((installed_drives++))
             else
                 echo "⚠ Warning: Failed to install GRUB to $drive"
@@ -1213,7 +1246,7 @@ GRUB_EOF
             success "Manual GRUB configuration created"
         fi
         
-        # Install GRUB to each drive individually
+        # Install GRUB to each drive individually with multiple methods
         for drive in $root_drives; do
             drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
             if [[ -n "$drive" && -b "$drive" ]]; then
@@ -1225,16 +1258,55 @@ GRUB_EOF
                         warning "Failed to install GRUB EFI to $drive - system may not boot from this drive"
                     fi
                 else
-                    if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --force $drive"; then
-                        success "GRUB installed to $drive"
-                    else
-                        warning "Failed to install GRUB to $drive - system may not boot from this drive"
+                    # Try multiple methods for Legacy BIOS GRUB installation
+                    local grub_success=false
+                    
+                    # Method 1: Skip filesystem probe
+                    if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --boot-directory=/boot --force --skip-fs-probe $drive" 2>/dev/null; then
+                        success "GRUB installed to $drive (skip-fs-probe)"
+                        grub_success=true
+                    # Method 2: Allow floppy compatibility
+                    elif timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --boot-directory=/boot --force --allow-floppy $drive" 2>/dev/null; then
+                        success "GRUB installed to $drive (allow-floppy)"
+                        grub_success=true
+                    # Method 3: No floppy
+                    elif timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --boot-directory=/boot --force --no-floppy $drive" 2>/dev/null; then
+                        success "GRUB installed to $drive (no-floppy)"
+                        grub_success=true
+                    # Method 4: Direct from rescue system
+                    elif timeout 60 bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --boot-directory=$mount_point/boot --force --skip-fs-probe $drive" 2>/dev/null; then
+                        success "GRUB installed to $drive (direct from rescue)"
+                        grub_success=true
+                    fi
+                    
+                    if [[ "$grub_success" != "true" ]]; then
+                        warning "Failed to install GRUB to $drive with all methods - system may not boot from this drive"
                     fi
                 fi
             fi
         done
         
-        warning "Manual GRUB configuration completed with potential issues"
+        # Verify GRUB installation
+        info "Verifying GRUB installation..."
+        local grub_verified=false
+        
+        for drive in $root_drives; do
+            drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
+            if [[ -n "$drive" && -b "$drive" ]]; then
+                if dd if="$drive" bs=512 count=1 2>/dev/null | grep -q "GRUB" 2>/dev/null; then
+                    success "GRUB signature verified on $drive"
+                    grub_verified=true
+                else
+                    warning "No GRUB signature found on $drive"
+                fi
+            fi
+        done
+        
+        if [[ "$grub_verified" == "true" ]]; then
+            success "Manual GRUB configuration completed successfully"
+        else
+            warning "Manual GRUB configuration completed but GRUB signatures not detected"
+        fi
     fi
     
     success "Bootloader configured"
