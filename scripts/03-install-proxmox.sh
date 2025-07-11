@@ -861,7 +861,23 @@ EOF
     success "GRUB ZFS configuration added"
     
     # Configure GRUB ZFS support modules
-    configure_grub_zfs_support
+    info "Configuring GRUB ZFS support modules..."
+    
+    # Ensure ZFS module is available for GRUB
+    chroot "$mount_point" bash -c "
+        # Create GRUB ZFS module directory if it doesn't exist
+        mkdir -p /boot/grub/i386-pc
+        
+        # Copy ZFS module for GRUB if available
+        if [[ -f /usr/lib/grub/i386-pc/zfs.mod ]]; then
+            cp /usr/lib/grub/i386-pc/zfs.mod /boot/grub/i386-pc/ 2>/dev/null || true
+        fi
+        
+        # Create GRUB environment file with ZFS support
+        grub-editenv /boot/grub/grubenv create 2>/dev/null || true
+        grub-editenv /boot/grub/grubenv set zfs_support=enabled 2>/dev/null || true
+        grub-editenv /boot/grub/grubenv set zfs_root=$zfs_root_dataset 2>/dev/null || true
+    " 2>/dev/null || warning "Could not configure all GRUB ZFS modules"
     
     # Get the list of drives in the root pool for GRUB installation
     info "Detecting drives in root pool..."
@@ -1415,74 +1431,6 @@ else
     fi
 fi
 EOF
-
-    # Configure GRUB for ZFS support
-    configure_grub_zfs_support() {
-        local mount_point="/mnt/proxmox"
-        
-        info "Configuring GRUB ZFS support modules..."
-        
-        # Ensure ZFS module is available for GRUB
-        chroot "$mount_point" bash -c "
-            # Create GRUB ZFS module directory if it doesn't exist
-            mkdir -p /boot/grub/i386-pc
-            
-            # Copy ZFS module for GRUB if available
-            if [[ -f /usr/lib/grub/i386-pc/zfs.mod ]]; then
-                cp /usr/lib/grub/i386-pc/zfs.mod /boot/grub/i386-pc/ 2>/dev/null || true
-            fi
-            
-            # Create GRUB environment file with ZFS support
-            grub-editenv /boot/grub/grubenv create 2>/dev/null || true
-            grub-editenv /boot/grub/grubenv set zfs_support=enabled 2>/dev/null || true
-        " 2>/dev/null || warning "Could not configure all GRUB ZFS modules"
-        
-        # Create ZFS-compatible GRUB install wrapper
-        cat > "$mount_point/tmp/grub-install-zfs" << 'EOF'
-#!/bin/bash
-# GRUB installation wrapper with ZFS support
-
-set -euo pipefail
-
-TARGET="$1"
-shift
-DRIVE="$1"
-shift
-
-echo "Installing GRUB to $DRIVE with ZFS support..."
-
-# Method 1: Install with ZFS module preloaded and skip filesystem detection
-if grub-install --target="$TARGET" --force --skip-fs-probe --modules="biosdisk part_msdos part_gpt zfs" "$DRIVE" 2>/dev/null; then
-    echo "✓ GRUB installed successfully (ZFS modules)"
-    exit 0
-fi
-
-# Method 2: Install with minimal modules to avoid filesystem conflicts
-if grub-install --target="$TARGET" --force --skip-fs-probe --no-floppy --modules="biosdisk part_msdos part_gpt" "$DRIVE" 2>/dev/null; then
-    echo "✓ GRUB installed successfully (minimal modules)"
-    exit 0
-fi
-
-# Method 3: Force installation without any filesystem detection
-if grub-install --target="$TARGET" --force --skip-fs-probe --no-floppy --no-edd "$DRIVE" 2>/dev/null; then
-    echo "✓ GRUB installed successfully (force)"
-    exit 0
-fi
-
-# Method 4: Raw installation to MBR
-if grub-install --target="$TARGET" --force --skip-fs-probe --boot-directory=/boot "$DRIVE" 2>/dev/null; then
-    echo "✓ GRUB installed successfully (boot-directory)"
-    exit 0
-fi
-
-echo "⚠ All GRUB installation methods failed for $DRIVE"
-exit 1
-EOF
-        
-        chmod +x "$mount_point/tmp/grub-install-zfs"
-        
-        success "GRUB ZFS support configured"
-}
     
     success "Bootloader configured"
 }
