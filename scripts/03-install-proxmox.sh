@@ -492,18 +492,86 @@ configure_bootloader() {
     
     info "Configuring bootloader..."
     
-    # Install GRUB
-    info "Installing GRUB package..."
-    if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc" 2>&1; then
-        warning "GRUB installation may have failed or timed out, continuing..."
+    # Detect firmware type (UEFI vs Legacy BIOS)
+    local firmware_type="legacy"
+    local efi_partition="${EFI_PARTITION:-}"
+    local grub_target="i386-pc"
+    
+    info "Detecting firmware type..."
+    
+    # Check configuration override first
+    if [[ "${FIRMWARE_TYPE:-auto}" != "auto" ]]; then
+        firmware_type="${FIRMWARE_TYPE}"
+        info "Firmware type set by configuration: $firmware_type"
+    elif [[ -d /sys/firmware/efi ]]; then
+        firmware_type="uefi"
+        info "UEFI firmware detected"
     else
-        success "GRUB package installed successfully"
+        firmware_type="legacy"
+        info "Legacy BIOS firmware detected"
     fi
     
-    # Configure GRUB defaults to prevent interactive prompts
+    # Set GRUB target based on firmware type
+    if [[ "$firmware_type" == "uefi" ]]; then
+        grub_target="x86_64-efi"
+        
+        # Check for existing EFI system partition
+        if [[ -z "$efi_partition" ]]; then
+            local efi_partitions
+            efi_partitions=$(lsblk -no NAME,FSTYPE,MOUNTPOINT | grep -E 'vfat.*(/boot/efi|/efi)' | awk '{print "/dev/" $1}' || echo "")
+            
+            if [[ -n "$efi_partitions" ]]; then
+                efi_partition=$(echo "$efi_partitions" | head -1)
+                info "Found existing EFI partition: $efi_partition"
+            else
+                # Look for vfat partitions that could be EFI
+                efi_partitions=$(lsblk -no NAME,FSTYPE | grep vfat | awk '{print "/dev/" $1}' || echo "")
+                if [[ -n "$efi_partitions" ]]; then
+                    efi_partition=$(echo "$efi_partitions" | head -1)
+                    warning "No mounted EFI partition found, using: $efi_partition"
+                else
+                    error_exit "UEFI system detected but no EFI partition found. Cannot install UEFI bootloader."
+                fi
+            fi
+        else
+            info "Using configured EFI partition: $efi_partition"
+        fi
+    fi
+    
+    # Install appropriate GRUB package
+    info "Installing GRUB package for $firmware_type boot..."
+    if [[ "$firmware_type" == "uefi" ]]; then
+        if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y grub-efi-amd64" 2>&1; then
+            warning "GRUB EFI installation may have failed or timed out, continuing..."
+        else
+            success "GRUB EFI package installed successfully"
+        fi
+        
+        # Create EFI directory and mount EFI partition
+        mkdir -p "$mount_point/boot/efi"
+        if [[ -n "$efi_partition" ]]; then
+            if ! mountpoint -q "$mount_point/boot/efi"; then
+                mount "$efi_partition" "$mount_point/boot/efi" || error_exit "Failed to mount EFI partition"
+                info "EFI partition mounted at $mount_point/boot/efi"
+            fi
+        fi
+    else
+        if ! timeout 120 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc" 2>&1; then
+            warning "GRUB installation may have failed or timed out, continuing..."
+        else
+            success "GRUB package installed successfully"
+        fi
+    fi
+    
+    # Configure GRUB debconf settings to prevent interactive prompts
     info "Configuring GRUB debconf settings..."
-    chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections"
-    chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections"
+    if [[ "$firmware_type" == "uefi" ]]; then
+        chroot "$mount_point" bash -c "echo 'grub-efi-amd64 grub2/update_nvram boolean true' | debconf-set-selections"
+        chroot "$mount_point" bash -c "echo 'grub-efi-amd64 grub2/force_efi_extra_removable boolean true' | debconf-set-selections"
+    else
+        chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections"
+        chroot "$mount_point" bash -c "echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections"
+    fi
     success "GRUB debconf settings configured"
     
     # Configure GRUB for ZFS
@@ -524,6 +592,8 @@ set -euo pipefail
 echo "Starting GRUB configuration..."
 echo "Pool: $1"
 echo "Drives: $2"
+echo "Firmware: $3"
+echo "GRUB Target: $4"
 
 # Set environment variables for ZFS
 export ZPOOL_VDEV_NAME_PATH=1
@@ -562,12 +632,6 @@ else
     echo "✓ Pool $1 is already imported"
 fi
 
-# Configure GRUB defaults for non-interactive mode
-echo "Configuring GRUB debconf settings..."
-echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections
-echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections
-echo "✓ GRUB debconf configured"
-
 # Update initramfs to include ZFS
 echo "Updating initramfs (this may take a few minutes)..."
 if run_with_timeout "update-initramfs -u -k all 2>&1"; then
@@ -597,45 +661,70 @@ else
 fi
 
 # Install GRUB to boot devices
-echo "Installing GRUB to drives: $2"
-failed_drives=0
-installed_drives=0
+firmware_type="$3"
+grub_target="$4"
 
-for drive in $2; do
-    # Clean up drive path
-    drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
-    if [[ -n "$drive" && -b "$drive" ]]; then
-        echo "Installing GRUB to $drive..."
-        if run_with_timeout "grub-install --target=i386-pc --force $drive 2>&1"; then
-            echo "✓ GRUB installed successfully to $drive"
-            ((installed_drives++))
+if [[ "$firmware_type" == "uefi" ]]; then
+    echo "Installing GRUB for UEFI boot..."
+    
+    # Install GRUB to EFI system partition
+    if run_with_timeout "grub-install --target=$grub_target --efi-directory=/boot/efi --bootloader-id=proxmox --recheck 2>&1"; then
+        echo "✓ GRUB EFI installed successfully"
+        
+        # Create fallback boot entry for removable media
+        if run_with_timeout "grub-install --target=$grub_target --efi-directory=/boot/efi --bootloader-id=proxmox --removable 2>&1"; then
+            echo "✓ GRUB EFI fallback entry created"
         else
-            echo "⚠ Warning: Failed to install GRUB to $drive"
-            ((failed_drives++))
+            echo "⚠ Warning: Could not create GRUB EFI fallback entry"
         fi
+        
+        echo "✓ UEFI GRUB configuration completed successfully"
+        exit 0
     else
-        echo "⚠ Skipping invalid drive: '$drive'"
+        echo "⚠ Error: GRUB EFI installation failed"
+        exit 1
     fi
-done
-
-echo "GRUB installation summary:"
-echo "- Successfully installed to $installed_drives drive(s)"
-echo "- Failed on $failed_drives drive(s)"
-
-if [[ $installed_drives -gt 0 ]]; then
-    echo "✓ GRUB configuration completed! Successfully installed to $installed_drives drive(s)"
-    exit 0
 else
-    echo "⚠ Error: GRUB installation failed on all drives"
-    exit 1
+    echo "Installing GRUB for Legacy BIOS boot to drives: $2"
+    failed_drives=0
+    installed_drives=0
+
+    for drive in $2; do
+        # Clean up drive path
+        drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
+        if [[ -n "$drive" && -b "$drive" ]]; then
+            echo "Installing GRUB to $drive..."
+            if run_with_timeout "grub-install --target=$grub_target --force $drive 2>&1"; then
+                echo "✓ GRUB installed successfully to $drive"
+                ((installed_drives++))
+            else
+                echo "⚠ Warning: Failed to install GRUB to $drive"
+                ((failed_drives++))
+            fi
+        else
+            echo "⚠ Skipping invalid drive: '$drive'"
+        fi
+    done
+
+    echo "GRUB installation summary:"
+    echo "- Successfully installed to $installed_drives drive(s)"
+    echo "- Failed on $failed_drives drive(s)"
+
+    if [[ $installed_drives -gt 0 ]]; then
+        echo "✓ Legacy BIOS GRUB configuration completed! Successfully installed to $installed_drives drive(s)"
+        exit 0
+    else
+        echo "⚠ Error: GRUB installation failed on all drives"
+        exit 1
+    fi
 fi
 EOF
-    
+
     chmod +x "$mount_point/tmp/configure-grub.sh"
     
     # Get the list of drives in the root pool
     info "Detecting drives in root pool..."
-    local root_drives
+    local root_drives=""
     
     # Clean up any hung ZFS processes before detection
     cleanup_zfs_processes
@@ -836,7 +925,7 @@ EOF
     info "This may take several minutes - please wait..."
     
     # Set a longer timeout for the complete GRUB configuration process
-    if timeout --kill-after=30s 300s chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives" 2>&1; then
+    if timeout --kill-after=30s 300s chroot "$mount_point" /tmp/configure-grub.sh "$ZFS_ROOT_POOL_NAME" "$root_drives" "$firmware_type" "$grub_target" 2>&1; then
         success "GRUB configuration completed successfully"
     else
         warning "GRUB configuration script failed or timed out after 5 minutes, attempting manual recovery..."
@@ -866,10 +955,18 @@ EOF
             drive=$(echo "$drive" | sed 's/[[:space:]]*$//')
             if [[ -n "$drive" && -b "$drive" ]]; then
                 info "Installing GRUB to $drive manually..."
-                if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=i386-pc --force $drive"; then
-                    success "GRUB installed to $drive"
+                if [[ "$firmware_type" == "uefi" ]]; then
+                    if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --efi-directory=/boot/efi --bootloader-id=proxmox --recheck $drive"; then
+                        success "GRUB EFI installed to $drive"
+                    else
+                        warning "Failed to install GRUB EFI to $drive - system may not boot from this drive"
+                    fi
                 else
-                    warning "Failed to install GRUB to $drive - system may not boot from this drive"
+                    if timeout 60 chroot "$mount_point" bash -c "DEBIAN_FRONTEND=noninteractive grub-install --target=$grub_target --force $drive"; then
+                        success "GRUB installed to $drive"
+                    else
+                        warning "Failed to install GRUB to $drive - system may not boot from this drive"
+                    fi
                 fi
             fi
         done

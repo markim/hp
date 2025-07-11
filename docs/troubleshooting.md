@@ -27,6 +27,31 @@
 2. Update ISO URL in `config/server-config.conf`
 3. Download manually and place in `/tmp/proxmox-ve.iso`
 
+#### Error: "GRUB installation failed" or System won't boot
+**Cause:** Firmware type mismatch (UEFI vs Legacy BIOS).
+**Solution:**
+1. Check firmware type: `ls /sys/firmware/efi` (exists = UEFI)
+2. For UEFI systems:
+   - Ensure EFI partition exists: `lsblk -o NAME,FSTYPE | grep vfat`
+   - Set firmware type in config: `FIRMWARE_TYPE="uefi"`
+   - Check EFI partition is mounted at `/boot/efi`
+3. For Legacy BIOS systems:
+   - Set firmware type in config: `FIRMWARE_TYPE="legacy"`
+   - Ensure drives have proper MBR partition table
+4. For Hetzner servers (typically UEFI-only):
+   - Use `FIRMWARE_TYPE="uefi"` in configuration
+   - Verify rescue system is booted in UEFI mode
+   - Check that `/sys/firmware/efi` directory exists
+
+#### Error: "No EFI partition found" on UEFI systems
+**Cause:** EFI system partition missing or not detected.
+**Solution:**
+1. Check for EFI partitions: `lsblk -o NAME,FSTYPE | grep vfat`
+2. If none exist, you may need to:
+   - Boot Hetzner rescue system with installimage first
+   - Or manually create EFI partition before running installation
+3. Set EFI partition in config: `EFI_PARTITION="/dev/sdaX"`
+
 ### ZFS Issues
 
 #### Error: "Pool already exists"

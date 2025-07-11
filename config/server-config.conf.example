@@ -104,6 +104,18 @@ DISABLE_ENTERPRISE_REPO="yes"
 # NETWORK_DNS2="8.8.8.8"
 
 # ===========================================
+# Boot Configuration
+# ===========================================
+
+# Firmware type detection (usually auto-detected)
+# Set to "uefi" to force UEFI boot, "legacy" for BIOS, or "auto" for detection
+FIRMWARE_TYPE="auto"
+
+# For UEFI systems, specify EFI partition if non-standard
+# Leave empty to auto-detect
+# EFI_PARTITION="/dev/sda1"
+
+# ===========================================
 # Advanced ZFS Options
 # ===========================================
 
