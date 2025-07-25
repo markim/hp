@@ -1,46 +1,73 @@
-# Enhanced Proxmox VE Installation Script for Hetzner
+# Hetzner Proxmox VE Installation Scripts
 
-An updated version of the ariadata/proxmox-hetzner script with additional features:
+Automated installation scripts for Proxmox VE on Hetzner dedicated servers with proper network configuration.
 
 ## 🚀 Features
 
-- **🔧 Drive Selection**: Choose which drives of the same size to install Proxmox to
-- **🌐 Routed Network Topology**: Implements Hetzner's recommended routed network configuration
-- **📡 Remote Execution**: Execute installation commands via SSH from a remote machine
-- **🔍 Automated Detection**: Automatically detects available drives and network configuration
-- **💾 ZFS RAID Configuration**: Supports various ZFS RAID levels (RAID-0, RAID-1, RAID-10, RAIDZ1, RAIDZ2)
-- **📋 IP Management**: Helper scripts for managing additional IPs in routed setup
-- **🛡️ Security Hardening**: Applies recommended security settings automatically
+- **🔧 Drive Selection**: Choose which drives to use for ZFS installation
+- **🌐 Routed Network**: Implements Hetzner's recommended routed network topology
+- **📡 Remote Execution**: Install from your local machine via SSH
+- **🔍 Auto Detection**: Automatically detects drives and network configuration
+- **💾 ZFS Support**: Multiple RAID levels (RAID-0, RAID-1, RAID-10, RAIDZ1, RAIDZ2)
+- **📋 IP Management**: Helper scripts for managing additional IPs
+- **🛡️ Security**: Applies recommended security hardening
 
 ## 📁 Project Structure
 
 ```text
 hp/
-├── install.sh              # Main installation script
-├── remote-install.sh        # Remote execution script
-├── manage-ips.sh           # Additional IP management helper
-├── README.md               # This file
-├── INSTALLATION_GUIDE.md   # Detailed installation guide
-├── Makefile               # Build automation
+├── install.sh                      # Main installation script
+├── remote-install.sh               # Remote execution wrapper
+├── manage-ips.sh                   # Additional IP management
+├── corrected-interfaces.conf       # Your specific routed config
+├── corrected-interfaces-bridged.conf # Your specific bridged config
+├── README.md                       # This file
+├── INSTALLATION_GUIDE.md           # Detailed guide
+├── TROUBLESHOOTING.md              # Common issues
+├── Makefile                        # Build automation
 └── examples/
-    ├── README.md          # Network configuration examples
-    ├── interfaces-routed-ipv4.conf   # IPv4 routed setup
-    ├── interfaces-routed-dual.conf   # IPv4+IPv6 routed setup
-    └── interfaces-bridged.conf       # Traditional bridged setup
+    ├── README.md                   # Configuration examples
+    ├── interfaces-routed-ipv4.conf # Routed setup template
+    ├── interfaces-routed-dual.conf # IPv4+IPv6 routed template
+    └── interfaces-bridged.conf     # Bridged setup template
 ```
+
+## 🌐 Network Configuration
+
+### Routed Setup (Recommended)
+
+- No virtual MAC addresses required
+- Better performance and easier management
+- Works with additional IPs out of the box
+- Uses point-to-point configuration
+
+### Bridged Setup
+
+- Requires virtual MAC addresses from Hetzner Robot Panel
+- Direct layer 2 access
+- More complex but supports legacy setups
 
 ## 🚀 Quick Start
 
+### Your Specific Configuration
+
+Your server details:
+
+- **Main IP**: 65.21.233.152/26
+- **Gateway**: 65.21.233.129
+- **Additional IP 1**: 65.21.233.139 (MAC: 00:50:56:00:6E:D9)
+- **Additional IP 2**: 65.21.233.140 (MAC: 00:50:56:00:3A:D9)
+
 ### Remote Installation (Recommended)
 
-Execute from your local machine to install on a remote Hetzner server:
+Execute from your local machine:
 
 ```bash
 # Download and run remote installation
-curl -sSL https://raw.githubusercontent.com/markim/hp/main/remote-install.sh | bash -s -- proxmox.80px.com
+curl -sSL https://raw.githubusercontent.com/markim/hp/main/remote-install.sh | bash -s -- YOUR_SERVER_IP
 
 # Or with SSH options
-curl -sSL https://raw.githubusercontent.com/markim/hp/main/remote-install.sh | bash -s -- -u root -p 22 198.51.100.10
+curl -sSL https://raw.githubusercontent.com/markim/hp/main/remote-install.sh | bash -s -- -u root -p 22 65.21.233.152
 ```
 
 ### Direct Installation

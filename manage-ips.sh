@@ -1,5 +1,6 @@
 #!/usr/bin/bash
-# Helper script for managing additional IPs in Proxmox routed network setup
+# Hetzner Proxmox Additional IP Management Script
+# Manages additional IPs in routed network setup
 
 set -e
 
@@ -15,8 +16,8 @@ INTERFACES_FILE="/etc/network/interfaces"
 BACKUP_DIR="/etc/network/backups"
 
 show_usage() {
-    echo -e "${CLR_CYAN}Proxmox Additional IP Management${CLR_RESET}"
-    echo "Helper script for managing additional IPs in routed network setup"
+    echo -e "${CLR_CYAN}Hetzner Proxmox Additional IP Management${CLR_RESET}"
+    echo "Manages additional IPs in routed network setup"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
@@ -29,14 +30,14 @@ show_usage() {
     echo "  status         Show network configuration status"
     echo ""
     echo "Examples:"
-    echo "  $0 add 203.0.113.10"
-    echo "  $0 add 192.0.2.20"
-    echo "  $0 remove 203.0.113.10"
+    echo "  $0 add 65.21.233.139"
+    echo "  $0 add 65.21.233.140"
+    echo "  $0 remove 65.21.233.139"
     echo "  $0 list"
     echo ""
     echo "Notes:"
-    echo "  • IPs are automatically configured with /32 mask for routed setup"
-    echo "  • IPv6 addresses are supported"
+    echo "  • IPs are configured with /32 mask for routed setup"
+    echo "  • Routes are added to vmbr0 bridge"
     echo "  • Network interface is restarted after changes"
     echo "  • Automatic backup is created before modifications"
     echo ""

@@ -1,52 +1,131 @@
-# Example Network Configurations
+# Network Configuration Examples
 
-This directory contains example network configurations for different Hetzner server setups.
+This directory contains standardized network configuration templates for Hetzner Proxmox installations.
 
-## Routed Network Setup (Recommended)
+## Available Configurations
 
-The routed setup is recommended by Hetzner for Proxmox installations. It provides better flexibility and doesn't require virtual MAC addresses.
+### Routed Setup (Recommended)
 
-### Features
+- **`interfaces-routed-ipv4.conf`** - IPv4 only routed configuration
+- **`interfaces-routed-dual.conf`** - IPv4 + IPv6 routed configuration
 
-- Main IP configured with /32 mask on physical interface
-- Bridge (vmbr0) configured for routing additional IPs
-- Private subnet bridge (vmbr1) for VM communication
-- IPv6 support with proper routing
-- IP forwarding enabled for guest systems
+### Bridged Setup
 
-### Configuration Files
+- **`interfaces-bridged.conf`** - Traditional bridged configuration
 
-- `interfaces-routed-ipv4.conf` - IPv4 only routed setup
-- `interfaces-routed-dual.conf` - IPv4 + IPv6 routed setup
-- `interfaces-bridged.conf` - Traditional bridged setup (requires virtual MACs)
+## Routed vs Bridged
 
-## Usage Examples
+### Routed Setup ✅ (Recommended)
 
-### Adding Additional IPs
+**Advantages:**
+- No virtual MAC addresses required
+- Better performance and lower latency
+- Easier IP management
+- Works out of the box with Hetzner routing
 
-For a routed setup, additional IPs are configured as routes in vmbr0:
+**Use when:**
+- You want the simplest and most reliable setup
+- You don't need layer 2 features
+- You're using standard VMs
+
+### Bridged Setup
+
+**Advantages:**
+- Direct layer 2 access
+- Supports protocols requiring MAC addresses
+- Can handle broadcast traffic
+
+**Requirements:**
+- Virtual MAC addresses from Hetzner Robot Panel
+- More complex configuration
+- Additional network setup steps
+
+**Use when:**
+- You need layer 2 functionality
+- Running specialized network applications
+- Migrating from physical servers that expect bridged networking
+
+## Configuration Templates
+
+### Template Variables
+
+Replace these placeholders in the configuration files:
 
 ```bash
-# Add IPv4 additional IP
-./manage-ips.sh add 203.0.113.10
-
-# Add IPv6 additional IP  
-./manage-ips.sh add 2001:db8::10
-
-# List configured IPs
-./manage-ips.sh list
+INTERFACE_NAME      # Your network interface (e.g., enp7s0, ens3)
+MAIN_IPV4          # Your main IP address
+MAIN_IPV4_GW       # Your gateway IP
+ADDITIONAL_IP_1    # First additional IP
+ADDITIONAL_IP_2    # Second additional IP
+PRIVATE_IP_CIDR    # Private subnet gateway (e.g., 192.168.100.1/24)
+PRIVATE_SUBNET     # Private subnet range (e.g., 192.168.100.0/24)
 ```
 
-### VM Network Configuration
+### Your Specific Values
 
-#### For VMs using additional IPs
+For your server (65.21.233.152):
+
+```bash
+INTERFACE_NAME="enp7s0"         # Replace with actual interface
+MAIN_IPV4="65.21.233.152"
+MAIN_IPV4_GW="65.21.233.129"
+ADDITIONAL_IP_1="65.21.233.139"
+ADDITIONAL_IP_2="65.21.233.140"
+PRIVATE_IP_CIDR="192.168.100.1/24"
+PRIVATE_SUBNET="192.168.100.0/24"
+```
+
+## VM Network Configuration
+
+### VMs with Additional Public IPs (Routed Setup)
 
 ```bash
 # /etc/network/interfaces in VM
 auto ens18
 iface ens18 inet static
-    address 203.0.113.10/32
-    gateway 198.51.100.10  # Main IP of the host
+    address 65.21.233.139/32
+    gateway 65.21.233.152  # Proxmox host IP
+```
+
+### VMs with Additional Public IPs (Bridged Setup)
+
+```bash
+# /etc/network/interfaces in VM
+auto ens18
+iface ens18 inet static
+    address 65.21.233.139/26
+    gateway 65.21.233.129   # Original gateway
+    
+# VM must use MAC: 00:50:56:00:6E:D9
+```
+
+### Private VMs (Both Setups)
+
+```bash
+# /etc/network/interfaces in VM
+auto ens18
+iface ens18 inet static
+    address 192.168.100.10/24
+    gateway 192.168.100.1   # Private bridge IP
+    dns-nameservers 1.1.1.1 8.8.8.8
+```
+
+## Managing Additional IPs
+
+Use the included management script:
+
+```bash
+# Add additional IP route (routed setup)
+./manage-ips.sh add 65.21.233.139
+
+# Remove additional IP route
+./manage-ips.sh remove 65.21.233.139
+
+# List configured additional IPs
+./manage-ips.sh list
+
+# Show network status
+./manage-ips.sh status
 ```
 
 #### For VMs using private subnet

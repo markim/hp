@@ -393,25 +393,23 @@ create_network_templates() {
     
     mkdir -p template_files
     
-    # Create routed network interfaces configuration
+    # Create routed network interfaces configuration (recommended for Hetzner)
     cat > template_files/interfaces <<EOF
-# Proxmox VE network configuration
-# This file describes the network interfaces available on your system
-# and how to activate them. For more information, see interfaces(5).
+# Hetzner Proxmox VE - Routed Network Configuration
+# This is the RECOMMENDED setup for Hetzner dedicated servers
+# Generated automatically by install script
 
 source /etc/network/interfaces.d/*
 
 auto lo
 iface lo inet loopback
 
-iface lo inet6 loopback
-
-# Physical interface - routed setup with /32 mask
+# Physical interface - routed setup with point-to-point
 auto $INTERFACE_NAME
 iface $INTERFACE_NAME inet static
     address $MAIN_IPV4/32
-    gateway $MAIN_IPV4_GW
     pointopoint $MAIN_IPV4_GW
+    gateway $MAIN_IPV4_GW
 
 EOF
 
@@ -428,14 +426,15 @@ EOF
     
     # Add bridge configuration for routed setup
     cat >> template_files/interfaces <<EOF
-# Bridge for additional IPs - routed setup
+# Main bridge - routed setup for additional IPs
 auto vmbr0
 iface vmbr0 inet static
     address $MAIN_IPV4/32
     bridge-ports none
     bridge-stp off
     bridge-fd 0
-    # Add routes for additional IPs here:
+    bridge-maxwait 0
+    # Add routes for additional IPs:
     # up ip route add ADDITIONAL_IP/32 dev vmbr0
 
 EOF
@@ -452,7 +451,7 @@ EOF
     
     # Add private subnet bridge
     cat >> template_files/interfaces <<EOF
-# Private subnet bridge for VMs
+# Private subnet bridge for internal VMs
 auto vmbr1
 iface vmbr1 inet static
     address $PRIVATE_IP_CIDR
